@@ -364,6 +364,8 @@ async def get_me(request: Request):
     async with database.session() as session:
         bal = await metering._balance(session, user.id)
         sub = bal["_sub"]
+        from .onboarding import is_pending as _survey_pending
+        survey_pending = await _survey_pending(session, user)
     # Report the entitling subscription when there is one; otherwise fall back to
     # a row that needs the customer's attention (card declined, payment never
     # finished). Without this a past_due customer sees a plain free account and
@@ -392,4 +394,5 @@ async def get_me(request: Request):
             "remaining": bal["remaining"],
         },
         "upload_post_profile": user.upload_post_profile,
+        "onboarding_survey_pending": survey_pending,
     }

@@ -17,6 +17,7 @@ import TopUpModal from './components/TopUpModal';
 import StarBanner from './components/StarBanner';
 import PlanChoiceModal from './components/PlanChoiceModal';
 import ClipTutorial from './components/ClipTutorial';
+import OnboardingSurvey from './components/OnboardingSurvey';
 import TrialUpgradeModal from './components/TrialUpgradeModal';
 import LoginModal from './components/LoginModal';
 import TrialGate from './components/TrialGate';
@@ -848,6 +849,13 @@ function App() {
   }, [billingEnabled, isSignedIn, tutorialPhase]);
 
   const tutorialLock = tutorialPhase === 'intro' || tutorialPhase === 'coach' || tutorialPhase === 'celebrate';
+
+  // Sign-up survey (cloud/onboarding.py): before the tutorial intro, never on
+  // top of a job that is already running (a parked request resuming, or the
+  // coach phase) or of the celebration.
+  const [surveyDone, setSurveyDone] = useState(false);
+  const showSurvey = billingEnabled && !!me?.onboarding_survey_pending && !surveyDone
+    && (tutorialPhase === null || tutorialPhase === 'intro') && status === 'idle';
 
   useEffect(() => {
     if (tutorialLock && activeTab !== 'dashboard') setActiveTab('dashboard');
@@ -2403,7 +2411,8 @@ function App() {
         />
       )}
       {showLogin && <LoginModal onClose={() => setShowLogin(false)} queued={typeof peekPendingJob()?.data?.payload === 'string'} />}
-      {tutorialPhase && (
+      {showSurvey && <OnboardingSurvey onDone={() => setSurveyDone(true)} />}
+      {tutorialPhase && !showSurvey && (
         <ClipTutorial
           phase={tutorialPhase}
           jobStatus={status}

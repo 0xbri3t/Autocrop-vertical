@@ -219,6 +219,31 @@ tick. All four are commercial: `emails.send_commercial_email` skips
 The Stripe webhook endpoint must have `checkout.session.expired` enabled.
 Promotion codes and coupon ids live in the env / Stripe, never in this repo.
 
+### Cancel flow (`cloud/cancellation.py`, `CancelPlanModal.jsx`)
+
+Account → "Cancel subscription" opens three steps: reason (closed list,
+`CANCEL_REASONS`, plus an optional detail box), a 1-5 rating with an optional
+review (and an "OK to quote publicly" box), then confirm.
+`POST /api/billing/cancel` sets `cancel_at_period_end` in Stripe with
+`cancellation_details` (our reason mapped to Stripe's feedback enum), and only
+after Stripe accepts writes a `cancellation_feedback` row (user-owned, erased
+with the account) and flips the local row, so the webhook sees no transition
+and the generic churn alert does not fire twice. The alert names the reason and
+rating, never the written text (Telegram, see `alerts.user_ref`): read reviews
+in the table. The Stripe portal can still cancel without the form; its alert
+carries Stripe's own feedback value when the portal asked for one.
+
+### Sign-up survey (`cloud/onboarding.py`, `OnboardingSurvey.jsx`)
+
+`signup_attribution` says which page a user came from, not why. Accounts
+younger than 7 days get one skippable screen before the clip tutorial (never
+over a running job): what they want to make (multi-select: clips, AI avatar /
+UGC videos, autopilot, thumbnails...), how they heard of us, and who they are.
+Closed lists mirrored in the JSX (a test checks), stored in
+`onboarding_surveys` (user-owned; a skip is a row too, so it is asked once),
+and tracked as `SignupSurveyAnswered` with one `goal_<x>` prop per goal so
+OpenPanel can break conversion down by what people came for.
+
 ### How many clips a job returns (`clip_selection.py`)
 
 The count is not a setting, it is derived, and every stage of the derivation

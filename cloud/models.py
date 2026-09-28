@@ -413,6 +413,42 @@ class LifecycleEmail(Base):
     )
 
 
+class CancellationFeedback(Base):
+    """Why a subscriber cancelled, and their review (cloud/cancellation.py).
+
+    One row per cancellation made through the dashboard flow. User-owned: the
+    free text belongs to the account and is erased with it, which is why it is
+    allowed here and not in ``account_deletions``.
+    """
+    __tablename__ = "cancellation_feedback"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    stripe_subscription_id = Column(Text, nullable=True)
+    plan = Column(String(20), nullable=True)
+    interval = Column(String(10), nullable=True)
+    reason = Column(String(32), nullable=False)          # one of cancellation.CANCEL_REASONS
+    details = Column(Text, nullable=True)
+    rating = Column(Integer, nullable=True)              # 1-5
+    review = Column(Text, nullable=True)
+    review_public_ok = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class OnboardingSurvey(Base):
+    """The sign-up survey (cloud/onboarding.py): where they heard of us, what
+    they came to make, who they are. One row per account, a skip included."""
+    __tablename__ = "onboarding_surveys"
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+                     primary_key=True)
+    skipped = Column(Boolean, nullable=False, default=False)
+    source = Column(String(32), nullable=True, index=True)   # one of onboarding.SOURCES
+    source_other = Column(Text, nullable=True)
+    goals = Column(JSONB, nullable=True)                      # list of onboarding.GOALS
+    role = Column(String(32), nullable=True, index=True)      # one of onboarding.ROLES
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class FirstVideoGrant(Base):
     """One free first video clipped whole (app.free_overflow), by client IP.
 
