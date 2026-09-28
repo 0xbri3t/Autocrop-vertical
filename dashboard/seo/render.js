@@ -414,7 +414,7 @@ const ATTRIBUTION = `
 const DEFAULT_CTA = {
   label: 'Try it',
   title: 'Paste a link, get vertical clips',
-  body: '20 free minutes a month, no credit card. Or self-host it free under MIT.',
+  body: 'Your first video free up to 60 minutes, then 20 free minutes a month, no credit card. Or self-host it free under MIT.',
   button: 'Get free clips',
 }
 

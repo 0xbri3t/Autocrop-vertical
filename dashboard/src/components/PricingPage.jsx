@@ -105,7 +105,7 @@ const TRUST_CARDS = [
     eyebrow: 'cancel anytime',
     body: (
       <>
-        Start on the free plan — 20 minutes a month, no credit card. Billing for paid
+        Start on the free plan — your first video free up to 60 minutes, then 20 minutes a month, no credit card. Billing for paid
         plans runs on Stripe — cancel anytime from your account.
       </>
     ),
@@ -167,7 +167,7 @@ export default function PricingPage({ onRequireLogin }) {
           <h1 className="font-display lowercase text-ink tracking-tight text-4xl md:text-6xl leading-[1.02] mb-5">
             start clipping in minutes.
           </h1>
-          <p className="readout">free plan · 20 min/month · no credit card</p>
+          <p className="readout">first video free (up to 60 min) · then 20 min/month · no credit card</p>
         </div>
       </header>
 

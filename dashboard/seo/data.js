@@ -48,7 +48,7 @@ export const EDITIONS = {
     highPrice: 59,
     currency: 'USD',
     summary:
-      'The same software with the compute and API keys covered. An NVIDIA GPU clips that same 8-minute video in about 50 seconds. Free plan is 20 minutes a month with a watermark and no credit card. Paid plans start at $12/month for 100 minutes with no watermark, up to $59/month.',
+      'The same software with the compute and API keys covered. An NVIDIA GPU clips that same 8-minute video in about 50 seconds. Free plan: the first video is clipped whole up to 60 minutes, then 20 minutes a month, with a watermark and no credit card. Paid plans start at $12/month for 100 minutes with no watermark, up to $59/month.',
   },
 }
 

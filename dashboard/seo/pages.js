@@ -1390,7 +1390,7 @@ const opusClipFree = () => ({
   updated: '2026-09-17',
   cta: {
     label: 'Free, both ways',
-    title: 'Twenty free minutes, no credit card',
+    title: 'First video free, no credit card',
     body: 'Or run the whole thing on your own machine for nothing: MIT-licensed, Docker, no watermark and no cap.',
     button: 'Get free clips',
   },

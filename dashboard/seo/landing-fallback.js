@@ -102,7 +102,7 @@ export const LANDING_FALLBACK = `<div id="seo-content" style="background:oklch(1
   <p style="${S.eyebrow}">AI clip generator &middot; cloud or self-hosted</p>
   <h1 style="${S.h1}">the free open source ai clip generator, built to clip what people actually watch.</h1>
   <p style="${S.p};max-width:44rem;font-size:1.05rem">Turn long videos into viral 9:16 shorts, or generate UGC marketing videos with AI actors. Online in the cloud with zero setup, or self-hosted with Docker for free. Also a clipping tool for AI agents: Claude, ChatGPT and n8n drive it over <a href="/mcp" style="${S.a}">MCP</a>, or run a channel on autopilot with <a href="/auto-clip" style="${S.a}">Autopilot</a> or the <a href="/n8n-youtube-shorts-automation" style="${S.a}">n8n workflow</a>. Just want it free? Start with the <a href="/free-ai-clip-generator" style="${S.a}">free AI clip generator</a>.</p>
-  <p style="${S.muted};max-width:44rem"><strong style="color:oklch(75% 0.11 150)">No credit card required.</strong> 20 free minutes every month. Paid plans from $12/month without a watermark. Prefer to run it yourself? <a style="${S.a}" href="https://github.com/mutonby/openshorts" rel="noopener">Self-host free on GitHub</a>.</p>
+  <p style="${S.muted};max-width:44rem"><strong style="color:oklch(75% 0.11 150)">No credit card required.</strong> Your first video is free up to 60 minutes, then 20 free minutes every month. Paid plans from $12/month without a watermark. Prefer to run it yourself? <a style="${S.a}" href="https://github.com/mutonby/openshorts" rel="noopener">Self-host free on GitHub</a>.</p>
 </div></section>
 
 <section style="${S.section}"><div style="${S.wrap}">

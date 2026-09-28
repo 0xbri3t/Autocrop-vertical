@@ -313,7 +313,7 @@ export default function Landing({ onLaunchApp }) {
               <span className="badge-ok whitespace-nowrap">
                 <Check size={12} /> no credit card required
               </span>
-              <span className="text-muted lowercase">20 free min every month</span>
+              <span className="text-muted lowercase">first video free (up to 60 min) · then 20 min every month</span>
               <button
                 onClick={onLaunchApp}
                 className="text-ink2 lowercase underline underline-offset-4 decoration-rule hover:text-ink hover:decoration-brass transition-colors"
@@ -441,7 +441,7 @@ export default function Landing({ onLaunchApp }) {
                 <span className="badge-brass">Recommended · Free Plan</span>
               </div>
               <ul className="space-y-1.5 mb-6 flex-1">
-                {['Our NVIDIA GPU: an 8-min video in about 50s', 'Gemini key included, nothing to set up', 'Social publishing built in', '20 free min/month, no card'].map((f, i) => (
+                {['Our NVIDIA GPU: an 8-min video in about 50s', 'Gemini key included, nothing to set up', 'Social publishing built in', 'First video free up to 60 min, then 20 min/month, no card'].map((f, i) => (
                   <li key={i} className="flex items-center gap-2 text-sm text-muted"><Check size={14} className="text-ok shrink-0" />{f}</li>
                 ))}
               </ul>
@@ -480,7 +480,7 @@ export default function Landing({ onLaunchApp }) {
         <section id="pricing" className="py-20 px-6 border-t border-rule">
           <div className="max-w-6xl mx-auto">
             <SectionHeader eyebrow="03 · Pricing" title="Simple, transparent pricing">
-              Free plan with 20 minutes a month — no credit card. Cancel anytime.
+              Your first video is free, up to 60 minutes. Then 20 free minutes a month — no credit card. Cancel anytime.
             </SectionHeader>
             <PricingSection onRequireLogin={() => { window.location.hash = '#/pricing'; }} />
           </div>
@@ -747,7 +747,7 @@ export default function Landing({ onLaunchApp }) {
       <section className="py-24 px-6 border-t border-rule">
         <div className="max-w-3xl mx-auto text-center">
           <h2 className="font-display text-4xl md:text-5xl lowercase text-ink tracking-tight mb-5">start creating viral videos today.</h2>
-          <p className="text-muted mb-10 max-w-xl mx-auto leading-relaxed lowercase">free plan · 20 min/month · no credit card — or self-host free with docker.</p>
+          <p className="text-muted mb-10 max-w-xl mx-auto leading-relaxed lowercase">first video free (up to 60 min) · then 20 min/month · no credit card — or self-host free with docker.</p>
           <div className="flex flex-wrap items-center justify-center gap-4">
             {billingEnabled ? (
               <a href="#pricing" className="btn-primary whitespace-nowrap">
