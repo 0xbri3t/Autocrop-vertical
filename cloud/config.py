@@ -89,6 +89,16 @@ def new_subscriber_label(status: str):
 # clips, so the wall stays as it was.
 PARTIAL_MIN_MINUTES = 5
 
+# A free account's FIRST video is clipped whole when it runs up to this many
+# minutes, even past the 20-minute balance: the balance goes to zero and the
+# user sees every clip of the video they came with. Once per account (any
+# reserved/committed process job disqualifies it), and the free plan itself is
+# already gated (Google or permanent email, re-registration blocked 90 days).
+# Longer first videos, and every later one past the balance, are clipped to
+# the first N minutes automatically instead of hitting the wall.
+# 0 disables the grant.
+FIRST_VIDEO_MAX_MINUTES = 60
+
 # Minute cap DURING the trial (across all plans). Kept for grandfathered
 # 'trialing' subscriptions; removable once no subscription has status
 # 'trialing'.

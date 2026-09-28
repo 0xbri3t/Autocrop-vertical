@@ -66,6 +66,42 @@ class TestPlanPartialMinutes:
         assert app_module.plan_partial_minutes(45, 20.0, "lots") == (45, None)
 
 
+class TestFreeOverflow:
+    """A free source past the balance never meets the wall: the first video
+    (<= FIRST_VIDEO_MAX_MINUTES) is clipped whole for the balance, any other
+    is clipped to the first N minutes."""
+
+    @pytest.fixture(autouse=True)
+    def _cap(self, monkeypatch):
+        monkeypatch.setattr(config, "FIRST_VIDEO_MAX_MINUTES", 60)
+
+    def test_first_video_up_to_the_cap_is_granted_whole(self):
+        assert app_module.free_overflow("free", 50, 20.0, None, False) == (20, None)
+        assert app_module.free_overflow("free", 60, 20.0, None, False) == (20, None)
+        # The grant charges the floored balance, which lands at zero.
+        assert app_module.free_overflow("free", 45, 17.6, None, False) == (17, None)
+
+    def test_first_video_past_the_cap_is_clipped_to_the_balance(self):
+        assert app_module.free_overflow("free", 61, 20.0, None, False) == (None, 20.0)
+
+    def test_later_videos_are_clipped_to_the_balance(self):
+        grant, max_minutes = app_module.free_overflow("free", 50, 20.0, None, True)
+        assert grant is None and max_minutes == 20.0
+        # ...which plan_partial_minutes turns into the usual first-N cut.
+        assert app_module.plan_partial_minutes(50, 20.0, max_minutes) == (
+            20, {"processed_minutes": 20, "total_minutes": 50})
+
+    def test_untouched_cases(self):
+        # Fits the balance, a paid plan, or the client already named a cut.
+        assert app_module.free_overflow("free", 15, 20.0, None, False) == (None, None)
+        assert app_module.free_overflow("starter", 50, 20.0, None, False) == (None, None)
+        assert app_module.free_overflow("free", 50, 20.0, 10, False) == (None, 10)
+
+    def test_grant_can_be_disabled(self, monkeypatch):
+        monkeypatch.setattr(config, "FIRST_VIDEO_MAX_MINUTES", 0)
+        assert app_module.free_overflow("free", 50, 20.0, None, False) == (None, 20.0)
+
+
 # --------------------------------------------------------------------------- #
 # Endpoint: max_minutes reaches the reservation, the cut reaches the job
 # --------------------------------------------------------------------------- #

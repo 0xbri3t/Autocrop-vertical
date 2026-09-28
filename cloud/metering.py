@@ -439,6 +439,23 @@ async def _plan_used_this_period(session, user_id, period_end) -> Decimal:
     return _D(total)
 
 
+async def has_processed_before(user_id) -> bool:
+    """True once the account has any live (reserved/committed) process job.
+
+    Released reservations (a job that failed or never started) don't count, so
+    a first video that errors out keeps the first-video grant for the retry.
+    """
+    async with database.session() as session:
+        row = (await session.execute(
+            select(UsageLedger.id).where(and_(
+                UsageLedger.user_id == user_id,
+                UsageLedger.job_type == "process",
+                UsageLedger.status.in_(("reserved", "committed")),
+            )).limit(1)
+        )).first()
+    return row is not None
+
+
 async def _topups_fifo(session, user_id):
     return list((await session.execute(
         select(CreditTopup).where(CreditTopup.user_id == user_id)

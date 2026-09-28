@@ -197,6 +197,11 @@ async def create_checkout(body: CheckoutRequest, request: Request):
         # that already converts at ~1%.
         tax_id_collection={"enabled": True},
         customer_update={"name": "auto", "address": "auto"},
+        # An unpaid session expires after 24 h; recovery makes Stripe hand the
+        # checkout.session.expired webhook a URL that reopens the same cart,
+        # which cloud/lifecycle.py mails once (1,011 of 1,126 sessions to
+        # 27-sep-2026 expired unpaid, none followed up).
+        after_expiration={"recovery": {"enabled": True, "allow_promotion_codes": True}},
         metadata={
             "user_id": str(user.id),
             "kind": entry["kind"],
@@ -398,6 +403,12 @@ async def handle_event(event: dict):
         await _track_invoice_revenue(obj)
     elif etype == "charge.refunded":
         await _track_refund(obj)
+    elif etype == "checkout.session.expired":
+        from . import lifecycle
+        try:
+            await lifecycle.on_checkout_expired(obj)
+        except Exception as e:  # an email must never make Stripe retry the event
+            print(f"⚠️  Checkout recovery email failed: {e}")
 
 
 async def _user_id_for_customer(session, customer_id):

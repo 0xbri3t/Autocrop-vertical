@@ -264,7 +264,7 @@ def _maybe_send_quota_email(user):
     _last_quota_email[str(user.id)] = now
     from cloud.emails import send_out_of_minutes_email
     upgrade_url = f"{_cloud_config.settings.frontend_url}/#/pricing"
-    asyncio.create_task(send_out_of_minutes_email(user.email, upgrade_url))
+    asyncio.create_task(send_out_of_minutes_email(user.email, upgrade_url, user.id))
 
 
 def _check_probe_rate(user_id):
@@ -312,6 +312,30 @@ def plan_partial_minutes(minutes_required: int, minutes_remaining: float, max_mi
     if minutes_required <= cap or cap < _cfg.PARTIAL_MIN_MINUTES:
         return minutes_required, None
     return cap, {"processed_minutes": cap, "total_minutes": minutes_required}
+
+
+def free_overflow(plan, minutes_required, minutes_remaining, max_minutes, processed_before):
+    """What a free account gets for a source longer than its balance.
+
+    Returns ``(grant, max_minutes)``:
+
+    * ``grant`` is the whole (floored) balance when this is the account's first
+      video and it fits ``FIRST_VIDEO_MAX_MINUTES``: the video is clipped whole
+      and only the balance is charged, so it lands at zero.
+    * otherwise ``max_minutes`` becomes the balance, so the job clips the first
+      N minutes (``plan_partial_minutes``) instead of answering with the wall.
+
+    Anything else (a paid plan, a source that fits, a client that already named
+    its own cut) passes through untouched.
+    """
+    from cloud import config as _cfg
+    remaining = max(0.0, float(minutes_remaining or 0))
+    if plan != "free" or max_minutes is not None or minutes_required <= remaining:
+        return None, max_minutes
+    if (not processed_before and remaining >= 1
+            and minutes_required <= _cfg.FIRST_VIDEO_MAX_MINUTES):
+        return int(math.floor(remaining)), None
+    return None, remaining
 
 
 async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=None):
@@ -404,15 +428,29 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
             pass
     minutes = max(1, math.ceil(minutes))
 
+    # Free account past its balance: the first video (up to
+    # FIRST_VIDEO_MAX_MINUTES) is clipped whole for the balance; any other is
+    # clipped to the first N minutes. Neither sees the wall.
+    grant = None
+    if balance.get("plan") == "free" and minutes > balance["remaining"] and max_minutes is None:
+        processed_before = await _metering.has_processed_before(user.id)
+        grant, max_minutes = free_overflow("free", minutes, balance["remaining"],
+                                           max_minutes, processed_before)
+
     # A source longer than the balance can be clipped in part instead of
     # refused: the wall offers "the first N minutes" (``partial_minutes`` in
     # the 402 below) and the client resubmits with ``max_minutes``.
-    reserve, partial = plan_partial_minutes(minutes, balance["remaining"], max_minutes)
+    if grant is not None:
+        reserve, partial = grant, None
+    else:
+        reserve, partial = plan_partial_minutes(minutes, balance["remaining"], max_minutes)
     try:
         reservation_id = await _metering.reserve_minutes(user.id, reserve, job_id)
         # Read by process_endpoint for the download's safety cut
-        # (SOURCE_CAP_MINUTES); kept off the return tuple on purpose.
-        request.state.reserved_minutes = reserve
+        # (SOURCE_CAP_MINUTES); kept off the return tuple on purpose. A granted
+        # first video is processed whole, so its cap is the probed length.
+        request.state.reserved_minutes = minutes if grant is not None else reserve
+        request.state.first_video = grant is not None
     except _metering.QuotaExceeded as e:
         _maybe_send_quota_email(user)
         raise HTTPException(status_code=402, detail={
@@ -2126,6 +2164,8 @@ async def lifespan(app: FastAPI):
         # Autopilot: watch connected YouTube channels for new videos. Paused
         # while this instance drains so only the new container submits jobs.
         cloud.autopilot.start(app, is_active=lambda: not _draining)
+        # Welcome / first-clip / win-back emails (cloud/lifecycle.py).
+        cloud.lifecycle.start(is_active=lambda: not _draining)
         # Nag on Telegram while the residential proxy is down/out of credits —
         # a single job-failure alert is easy to miss and ingest stays broken
         # until someone tops the balance up.
@@ -3119,7 +3159,8 @@ async def process_endpoint(
 
     _enqueue_job(job_id, priority)
 
-    return {"job_id": job_id, "status": "queued", "partial": partial}
+    return {"job_id": job_id, "status": "queued", "partial": partial,
+            "first_video": bool(getattr(request.state, "first_video", False))}
 
 def _job_view_from_disk(job_id):
     """What the disk says about a job this instance does not hold in memory.

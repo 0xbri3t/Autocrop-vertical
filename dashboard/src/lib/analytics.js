@@ -20,6 +20,10 @@ import { firstTouchProps } from './attribution';
 //   - CheckoutFailed     — /api/billing/checkout errored, `reason` says why
 //   - PartialClipChosen  — the wall's "clip the first N min" taken instead of a
 //                          plan (`required` / `partial` minutes)
+//   - FirstVideoGrant    — free account's first video (<= 60 min) clipped whole
+//                          past its balance, no wall shown
+//   - AutoPartial        — free source past the balance clipped to the first N
+//                          minutes by the server, no wall shown
 //   - Subscribed         — plan activated after checkout
 //   - SocialNudgeSeen    — post-generation "connect socials" banner rendered
 //   - SocialNudgeConnect — its connect button clicked (opens hosted connect page)

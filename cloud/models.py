@@ -25,11 +25,12 @@ class User(Base):
     stripe_customer_id = Column(Text, unique=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_login_at = Column(DateTime(timezone=True), nullable=True)
-    # Set by the unsubscribe link in the only email we send that is a
-    # commercial communication rather than a service notice (the out-of-minutes
-    # upsell). LSSI art. 21.2 lets us mail our own customers about a similar
-    # product, but only if every message carries a way out — so this column is
-    # what that link writes, and cloud/emails.py refuses to send when it is set.
+    # Set by the unsubscribe link in the emails that are commercial
+    # communications rather than service notices (the out-of-minutes upsell and
+    # the lifecycle emails). LSSI art. 21.2 lets us mail our own customers about
+    # a similar product, but only if every message carries a way out — so this
+    # column is what that link writes, and emails.send_commercial_email refuses
+    # to send when it is set.
     # Schema bootstrap is create_all, which never ALTERs: see
     # cloud/database.init_engine for the additive statement that adds it to an
     # existing database.
@@ -389,4 +390,23 @@ class AutopilotRun(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (
         UniqueConstraint("user_id", "video_id", name="uq_autopilot_user_video"),
+    )
+
+
+class LifecycleEmail(Base):
+    """One lifecycle email sent to one account (cloud/lifecycle.py).
+
+    The (user_id, kind) unique constraint is the dedupe and the claim: the row
+    is inserted BEFORE the email goes out, so two API containers running the
+    loop during a deploy never both send it, and an account never gets the
+    same kind twice.
+    """
+    __tablename__ = "lifecycle_emails"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    kind = Column(String(32), nullable=False)  # welcome | first_clip | winback | checkout_recovery
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("user_id", "kind", name="uq_lifecycle_user_kind"),
     )

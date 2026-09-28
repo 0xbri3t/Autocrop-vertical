@@ -27,7 +27,7 @@ def setup_sync(app):
     app.add_middleware(SessionMiddleware, secret_key=settings.jwt_secret)
 
     from . import (auth, oauth, billing, social_profiles, videos, api_keys,
-                   account, mcp_oauth, marketing, autopilot)
+                   account, mcp_oauth, marketing, autopilot, lifecycle)  # noqa: F401
     oauth.register()
     billing._init_stripe()
     app.include_router(auth.router)
@@ -40,7 +40,8 @@ def setup_sync(app):
     app.include_router(account.router)
     # Autopilot: clip new videos from the user's connected YouTube channel.
     app.include_router(autopilot.router)
-    # Unsubscribe from the one commercial email (LSSI art. 21.2).
+    # Unsubscribe from commercial email (LSSI art. 21.2): the out-of-minutes
+    # upsell and the lifecycle emails (cloud/lifecycle.py).
     app.include_router(marketing.router)
 
 

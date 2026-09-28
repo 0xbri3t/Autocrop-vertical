@@ -183,6 +183,38 @@ otherwise process 45 minutes on a 20-minute reservation. `/api/status` and
 the process response carry `partial`, and the results view says which part
 of the video the clips came from, with the upsell for the rest.
 
+### Free sources past the balance never meet the wall (`app.free_overflow`)
+
+Since 28-sep-2026 the wall above only shows to paid plans and to free
+accounts with less than `PARTIAL_MIN_MINUTES` left. For a free account whose
+source is longer than its balance, `reserve_process_minutes` decides on its
+own (the client sends no `max_minutes`):
+
+- **First video, up to `FIRST_VIDEO_MAX_MINUTES` (60):** clipped whole. Only
+  the floored balance is reserved (it lands at zero) and the download's safety
+  cap (`SOURCE_CAP_MINUTES`) is the probed length, not the reservation. Once
+  per account: `metering.has_processed_before` (any reserved/committed
+  `process` row; a released one keeps the grant for the retry). The response
+  carries `first_video: true`; the dashboard says so and tracks
+  `FirstVideoGrant`.
+- **Anything else:** `max_minutes` becomes the balance, so the job clips the
+  first N minutes exactly as if the user had taken the wall's offer. Tracked
+  client-side as `AutoPartial`.
+
+### Lifecycle emails (`cloud/lifecycle.py`)
+
+Welcome (minutes after sign-up), first-clip nudge (24-72 h, nothing
+processed), win-back (2-7 days after the first committed video, no plan; with
+`WINBACK_PROMO_CODE` when set) and checkout recovery (`checkout.session.expired`
+with the `after_expiration.recovery` URL that `create_checkout` now enables).
+Each at most once per account: a `lifecycle_emails` row is claimed before the
+send (unique `user_id, kind`). The loop sends at most `BATCH` per 10-minute
+tick. All four are commercial: `emails.send_commercial_email` skips
+`marketing_opt_out` accounts and adds the unsubscribe footer and
+`List-Unsubscribe` headers (the out-of-minutes upsell goes through it too).
+The Stripe webhook endpoint must have `checkout.session.expired` enabled.
+Promotion codes and coupon ids live in the env / Stripe, never in this repo.
+
 ### How many clips a job returns (`clip_selection.py`)
 
 The count is not a setting, it is derived, and every stage of the derivation

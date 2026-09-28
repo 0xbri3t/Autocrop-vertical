@@ -276,6 +276,8 @@ function App() {
   // {processed_minutes, total_minutes} when the running/finished job clips
   // only the first part of the source (the quota wall's free offer).
   const [partialJob, setPartialJob] = useState(null);
+  // The free plan's first video, clipped whole past the 20-minute balance.
+  const [firstVideoJob, setFirstVideoJob] = useState(false);
   // {position, ahead, eta_seconds} while the job waits in line, else null.
   const [queueInfo, setQueueInfo] = useState(null);
   // Why the last job could not start or failed, in plain words (or '').
@@ -968,6 +970,7 @@ function App() {
     setProjectState(null);
     setNoSource(false);
     setPartialJob(null);
+    setFirstVideoJob(false);
 
     try {
       let body;
@@ -1037,6 +1040,13 @@ function App() {
 
       setJobId(resData.job_id);
       setPartialJob(resData.partial || null);
+      setFirstVideoJob(!!resData.first_video);
+      // The server clipped past the balance on its own (no wall): the first
+      // video whole, or the first N minutes of a later one.
+      if (resData.first_video) track('FirstVideoGrant');
+      else if (resData.partial && data.maxMinutes == null) {
+        track('AutoPartial', { props: { processed: resData.partial.processed_minutes, total: resData.partial.total_minutes } });
+      }
       if (data.type === 'thumbnail_session') {
         setProcessingMedia({ type: 'server', payload: `/api/source/${resData.job_id}` });
       }
@@ -1112,6 +1122,7 @@ function App() {
     setProjectState(null);
     setNoSource(false);
     setPartialJob(null);
+    setFirstVideoJob(false);
     setQueueInfo(null);
     setJobError('');
     localStorage.removeItem(SESSION_KEY);
@@ -2111,7 +2122,17 @@ function App() {
                     )}
                     {/* Peak-moment upsell: they just SAW their clips — sell while
                         they're proud of the result, before asking for stars. */}
-                    {plan === 'free' && !partialJob && (
+                    {firstVideoJob && !partialJob && (
+                      <button
+                        onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
+                        className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
+                      >
+                        <span className="text-ink">Your first video is on us: we clipped all of it.</span>{' '}
+                        <span className="text-muted">That used this month's free minutes.</span>{' '}
+                        <span className="text-brass font-medium">Keep clipping →</span>
+                      </button>
+                    )}
+                    {plan === 'free' && !partialJob && !firstVideoJob && (
                       <button
                         onClick={() => { setTopUpInfo({ context: 'upsell' }); setShowTopUp(true); }}
                         className="w-full text-left px-3 py-2.5 rounded-input bg-paper3 border border-brass/40 hover:border-brass text-sm transition-colors"
