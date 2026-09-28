@@ -71,6 +71,16 @@ def env(monkeypatch):
     monkeypatch.setattr(cancellation, "get_current_user_required", _user)
     monkeypatch.setattr(cancellation.database, "session", lambda: _Session(state.sub, state.added))
     monkeypatch.setattr(cancellation, "_stripe_cancel_at_period_end", _modify)
+    monkeypatch.setattr(cancellation, "RETENTION_COUPON", "coupon_test")
+    state.offer_blocked = False
+    state.applied = []
+    state.resumed = []
+    monkeypatch.setattr(cancellation, "_stripe_offer_blocked", lambda sid: state.offer_blocked)
+    monkeypatch.setattr(cancellation, "_stripe_coupon_terms",
+                        lambda cid: {"percent_off": 50, "months": 3})
+    monkeypatch.setattr(cancellation, "_stripe_apply_retention",
+                        lambda sid, cid: state.applied.append((sid, cid)))
+    monkeypatch.setattr(cancellation, "_stripe_resume", lambda sid: state.resumed.append(sid))
     monkeypatch.setattr(cancellation.analytics, "track", lambda *a, **k: None)
     monkeypatch.setattr(alerts, "send_admin_alert", _alert)
     return state
@@ -133,6 +143,77 @@ class TestCancel:
         (subject, body), = env.alerts
         assert "Alice" not in body and "555" not in body
         assert "3f9a1c2b" in body and "too_expensive" in body and "1/5" in body
+
+
+def _offer():
+    return asyncio.run(cancellation.retention_offer(request=None))
+
+
+def _accept(**body):
+    body.setdefault("reason", "too_expensive")
+    return asyncio.run(cancellation.accept_retention_offer(
+        cancellation.CancelRequest(**body), request=None))
+
+
+class TestRetentionOffer:
+    def test_a_live_monthly_plan_gets_the_offer(self, env):
+        assert _offer() == {"eligible": True, "percent_off": 50, "months": 3}
+
+    @pytest.mark.parametrize("field,value", [
+        ("interval", "year"),        # would halve a whole year
+        ("status", "trialing"),
+        ("status", "past_due"),      # a discount does not fix a failed card
+    ])
+    def test_no_offer_outside_a_live_monthly_plan(self, env, field, value):
+        setattr(env.sub, field, value)
+        assert _offer() == {"eligible": False}
+
+    def test_no_second_offer_or_stacked_discount(self, env):
+        env.offer_blocked = True
+        assert _offer() == {"eligible": False}
+        with pytest.raises(HTTPException) as e:
+            _accept()
+        assert e.value.status_code == 409
+        assert env.applied == []
+
+    def test_a_stripe_hiccup_means_no_offer_not_a_broken_flow(self, env, monkeypatch):
+        def boom(_sid):
+            raise RuntimeError("stripe down")
+        monkeypatch.setattr(cancellation, "_stripe_offer_blocked", boom)
+        assert _offer() == {"eligible": False}
+
+    def test_taking_it_applies_the_coupon_and_keeps_the_feedback(self, env):
+        out = _accept(reason="not_using_it", details="busy month", rating=3)
+        assert out["ok"] and out["percent_off"] == 50
+        assert env.applied == [("sub_123", cancellation.RETENTION_COUPON)]
+        assert env.stripe_calls == []                  # nothing was cancelled
+        assert env.sub.cancel_at_period_end is False
+        (row,) = env.added
+        assert row.outcome == "retained" and row.reason == "not_using_it"
+        (subject, body), = env.alerts
+        assert "busy month" not in body and "50% off" in body
+
+    def test_no_coupon_configured_no_offer(self, env, monkeypatch):
+        monkeypatch.setattr(cancellation, "RETENTION_COUPON", "")
+        assert _offer() == {"eligible": False}
+
+    def test_a_cancel_row_says_so(self, env):
+        _cancel()
+        assert env.added[0].outcome == "canceled"
+
+
+class TestResume:
+    def test_undoes_a_scheduled_cancel(self, env):
+        env.sub.cancel_at_period_end = True
+        assert asyncio.run(cancellation.resume_subscription(request=None))["ok"]
+        assert env.resumed == ["sub_123"]
+        assert env.sub.cancel_at_period_end is False
+
+    def test_nothing_to_undo(self, env):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(cancellation.resume_subscription(request=None))
+        assert e.value.status_code == 409
+        assert env.resumed == []
 
 
 class TestReasons:

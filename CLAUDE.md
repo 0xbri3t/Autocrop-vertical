@@ -230,8 +230,19 @@ after Stripe accepts writes a `cancellation_feedback` row (user-owned, erased
 with the account) and flips the local row, so the webhook sees no transition
 and the generic churn alert does not fire twice. The alert names the reason and
 rating, never the written text (Telegram, see `alerts.user_ref`): read reviews
-in the table. The Stripe portal can still cancel without the form; its alert
-carries Stripe's own feedback value when the portal asked for one.
+in the table.
+
+The last step leads with a retention offer (`RETENTION_COUPON_ID` env, the
+coupon the portal used to offer): `GET /api/billing/retention-offer` says
+whether this subscription gets it (live monthly plan, no discount on it, never
+offered before: `retention_offer` in the Stripe subscription metadata; any
+Stripe error means no offer), `POST /api/billing/retention-offer/accept` applies
+it and stores the feedback row with `outcome="retained"` (cancels store
+`"canceled"`). Cancelling is OFF in the Stripe portal config since 2026-09-28,
+so this flow is the only way to cancel; `POST /api/billing/resume` undoes a
+scheduled cancel ("Keep my subscription" on the account page), since the
+portal's renew went with its cancel feature. The webhook alert for a portal
+cancel stays for cancels made from the Stripe Dashboard.
 
 ### Sign-up survey (`cloud/onboarding.py`, `OnboardingSurvey.jsx`)
 

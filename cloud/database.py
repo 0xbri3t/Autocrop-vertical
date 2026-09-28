@@ -20,6 +20,8 @@ _ADDITIVE_COLUMNS = (
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS free_plan_denied VARCHAR(32)",
     # The per-network first-video check joins first_video_grants on job_id.
     "CREATE INDEX IF NOT EXISTS ix_usage_job_id ON usage_ledger (job_id)",
+    # cancellation_feedback shipped without it; rows before it are all cancels.
+    "ALTER TABLE cancellation_feedback ADD COLUMN IF NOT EXISTS outcome VARCHAR(16)",
 )
 
 

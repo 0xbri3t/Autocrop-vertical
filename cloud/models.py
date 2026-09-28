@@ -416,7 +416,8 @@ class LifecycleEmail(Base):
 class CancellationFeedback(Base):
     """Why a subscriber cancelled, and their review (cloud/cancellation.py).
 
-    One row per cancellation made through the dashboard flow. User-owned: the
+    One row per pass through the dashboard flow that ended in a cancel or in
+    the retention offer being taken (``outcome``). User-owned: the
     free text belongs to the account and is erased with it, which is why it is
     allowed here and not in ``account_deletions``.
     """
@@ -432,6 +433,7 @@ class CancellationFeedback(Base):
     rating = Column(Integer, nullable=True)              # 1-5
     review = Column(Text, nullable=True)
     review_public_ok = Column(Boolean, nullable=False, default=False)
+    outcome = Column(String(16), nullable=True)          # canceled | retained
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 

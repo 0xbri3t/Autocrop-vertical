@@ -89,6 +89,18 @@ export default function AccountPage() {
     } catch (e) { setBusy(false); alert('Could not open billing portal.'); }
   }, []);
 
+  // The portal no longer cancels, and its "renew" went with that, so undoing
+  // a scheduled cancel happens here (cloud/cancellation.py).
+  const resume = useCallback(async () => {
+    setBusy(true);
+    try {
+      await apiJson('/api/billing/resume', { method: 'POST' });
+      track('SubscriptionResumed', { props: { plan } });
+      await refreshMe();
+    } catch (e) { alert(e?.detail || 'Could not resume your subscription.'); }
+    setBusy(false);
+  }, [plan, refreshMe]);
+
   const buyTopup = useCallback(async (price_id) => {
     setBusy(true);
     try {
@@ -188,13 +200,21 @@ export default function AccountPage() {
           </div>
         </div>
 
-        {/* Our own cancel flow (reason + review) rather than the portal's, so
-            the one moment a customer says what went wrong is not lost. */}
+        {/* Our own cancel flow (reason + review + retention offer). The portal
+            cannot cancel (turned off in Stripe), so this is the only way out. */}
         {me.has_billing_account && CANCELLABLE_STATES.includes(me.status) && !me.cancel_at_period_end && (
           <div className="pt-4 mt-4 border-t border-rule text-right">
             <button onClick={() => { track('CancelFlowOpened', { props: { plan } }); setCancelOpen(true); }}
                     className="text-xs text-muted underline underline-offset-2 hover:text-ink">
               Cancel subscription
+            </button>
+          </div>
+        )}
+        {me.has_billing_account && CANCELLABLE_STATES.includes(me.status) && me.cancel_at_period_end && (
+          <div className="pt-4 mt-4 border-t border-rule flex items-center justify-between gap-3 text-sm text-ink2">
+            <span>Your plan ends on {me.period_end ? new Date(me.period_end).toLocaleDateString('en-US', { month: 'long', day: 'numeric' }) : 'the end of the period'}.</span>
+            <button onClick={resume} disabled={busy} className="btn-ghost px-4 py-2 text-xs shrink-0">
+              Keep my subscription
             </button>
           </div>
         )}

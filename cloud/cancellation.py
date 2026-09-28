@@ -13,12 +13,22 @@ period and keep it. The portal stays available and can still cancel without
 this form; the webhook alert carries Stripe's own ``cancellation_details`` for
 those.
 
+Before the cancel, the last step offers the retention coupon (the portal's
+"Stay with us: 50% off for 3 months", ``RETENTION_COUPON``). Cancelling was
+turned off in the portal on 2026-09-28 so this flow, with its offer, is the only
+way out. The offer is made once per subscription (``retention_offer`` in its
+Stripe metadata), only on a live monthly plan with no discount on it: on a
+yearly plan it would halve a whole year. Taking it stores the same feedback row
+with ``outcome="retained"``. ``/api/billing/resume`` undoes a scheduled cancel,
+since the portal's "renew" goes with its cancel feature.
+
 Unlike ``account.DELETION_REASONS``, free text is fine here: these rows belong
 to the user (``account.USER_OWNED_TABLES``) and go with the account. What must
 not happen is the text reaching Telegram (see ``alerts.user_ref``), so the
 alert says how long the review is, never what it says.
 """
 import asyncio
+import os
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -52,6 +62,10 @@ CANCELLABLE_STATES = ("active", "trialing", "past_due")
 
 MAX_TEXT = 2000
 
+# The Stripe coupon offered before a cancel (env, like every coupon id; see
+# CLAUDE.md). Unset turns the offer off and the flow is reason -> review -> cancel.
+RETENTION_COUPON = os.environ.get("RETENTION_COUPON_ID", "").strip()
+
 
 class CancelRequest(BaseModel):
     reason: str
@@ -72,9 +86,154 @@ def _stripe_cancel_at_period_end(subscription_id: str, feedback: str, comment: s
     )
 
 
+def _stripe_offer_blocked(subscription_id: str) -> bool:
+    """True when this subscription already has a discount or had the offer."""
+    import stripe
+    live = stripe.Subscription.retrieve(subscription_id)
+    return bool(live.get("discounts") or live.get("discount")
+                or (live.get("metadata") or {}).get("retention_offer"))
+
+
+_coupon_terms = {}
+
+
+def _stripe_coupon_terms(coupon_id: str) -> dict:
+    if coupon_id not in _coupon_terms:
+        import stripe
+        c = stripe.Coupon.retrieve(coupon_id)
+        if not c.get("valid") or not c.get("percent_off"):
+            return {}
+        _coupon_terms[coupon_id] = {"percent_off": int(c["percent_off"]),
+                                    "months": c.get("duration_in_months")}
+    return _coupon_terms[coupon_id]
+
+
+def _stripe_apply_retention(subscription_id: str, coupon_id: str):
+    import stripe
+    stripe.Subscription.modify(
+        subscription_id,
+        discounts=[{"coupon": coupon_id}],
+        metadata={"retention_offer": "accepted"},
+    )
+
+
+def _stripe_resume(subscription_id: str):
+    import stripe
+    stripe.Subscription.modify(subscription_id, cancel_at_period_end=False)
+
+
 def _clean(text: Optional[str]) -> Optional[str]:
     text = (text or "").strip()
     return text or None
+
+
+async def _renewing_sub(user_id) -> Subscription:
+    """The user's subscription, if it is live and still set to renew."""
+    async with database.session() as session:
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.user_id == user_id)
+        )).scalar_one_or_none()
+    if not sub or sub.status not in CANCELLABLE_STATES:
+        raise HTTPException(status_code=409, detail="There is no active subscription to cancel.")
+    if sub.cancel_at_period_end:
+        raise HTTPException(status_code=409, detail="Your subscription is already set to cancel.")
+    return sub
+
+
+async def _offer_for(sub) -> Optional[dict]:
+    """The retention offer's terms for this subscription, or None."""
+    if not RETENTION_COUPON or sub.status != "active" or sub.interval != "month":
+        return None
+    try:
+        if await asyncio.to_thread(_stripe_offer_blocked, sub.stripe_subscription_id):
+            return None
+        return await asyncio.to_thread(_stripe_coupon_terms, RETENTION_COUPON) or None
+    except Exception as e:
+        # No offer is better than a cancel flow that cannot reach its last step.
+        print(f"⚠️  Retention offer check failed for {sub.stripe_subscription_id}: {e}")
+        return None
+
+
+@router.get("/api/billing/retention-offer")
+async def retention_offer(request: Request):
+    user = await get_current_user_required(request)
+    sub = await _renewing_sub(user.id)
+    offer = await _offer_for(sub)
+    return {"eligible": bool(offer), **(offer or {})}
+
+
+@router.post("/api/billing/retention-offer/accept")
+async def accept_retention_offer(body: CancelRequest, request: Request):
+    user = await get_current_user_required(request)
+    if body.reason not in CANCEL_REASONS:
+        raise HTTPException(status_code=422, detail="Pick a reason from the list.")
+    sub = await _renewing_sub(user.id)
+    offer = await _offer_for(sub)
+    if not offer:
+        raise HTTPException(status_code=409, detail="This offer is no longer available.")
+    try:
+        await asyncio.to_thread(_stripe_apply_retention, sub.stripe_subscription_id,
+                                RETENTION_COUPON)
+    except Exception as e:
+        print(f"⚠️  Retention coupon failed for {user.id}: {e}")
+        raise HTTPException(status_code=502, detail=(
+            "We couldn't apply the discount right now. Please try again, "
+            "or email info@openshorts.app."))
+
+    details, review = _clean(body.details), _clean(body.review)
+    async with database.session() as session:
+        async with session.begin():
+            session.add(CancellationFeedback(
+                user_id=user.id,
+                stripe_subscription_id=sub.stripe_subscription_id,
+                plan=sub.plan, interval=sub.interval,
+                reason=body.reason, details=details,
+                rating=body.rating, review=review,
+                review_public_ok=bool(body.review_public_ok and review),
+                outcome="retained",
+            ))
+
+    analytics.track("RetentionOfferAccepted", user_id=user.id, plan=sub.plan,
+                    reason=body.reason, rating=body.rating)
+
+    from .alerts import send_admin_alert, user_ref
+    term = f" for {offer['months']} months" if offer.get("months") else ""
+    await send_admin_alert(
+        "🛟 Cancel saved",
+        f"{user_ref(user.id)} was about to cancel the {sub.plan} plan "
+        f"(reason: {body.reason}) and took {offer['percent_off']}% off{term}.",
+    )
+    return {"ok": True, **offer}
+
+
+@router.post("/api/billing/resume")
+async def resume_subscription(request: Request):
+    user = await get_current_user_required(request)
+    async with database.session() as session:
+        sub = (await session.execute(
+            select(Subscription).where(Subscription.user_id == user.id)
+        )).scalar_one_or_none()
+    if not sub or sub.status not in CANCELLABLE_STATES or not sub.cancel_at_period_end:
+        raise HTTPException(status_code=409, detail="There is no scheduled cancellation to undo.")
+    try:
+        await asyncio.to_thread(_stripe_resume, sub.stripe_subscription_id)
+    except Exception as e:
+        print(f"⚠️  Stripe resume failed for {user.id}: {e}")
+        raise HTTPException(status_code=502, detail=(
+            "We couldn't resume your subscription right now. Please try again, "
+            "or email info@openshorts.app."))
+    async with database.session() as session:
+        async with session.begin():
+            row = (await session.execute(
+                select(Subscription).where(Subscription.id == sub.id).with_for_update()
+            )).scalar_one_or_none()
+            if row is not None:
+                row.cancel_at_period_end = False
+    analytics.track("SubscriptionResumed", user_id=user.id, plan=sub.plan)
+    from .alerts import send_admin_alert, user_ref
+    await send_admin_alert("🔺 Cancel undone",
+                           f"{user_ref(user.id)} resumed the {sub.plan} plan.")
+    return {"ok": True}
 
 
 @router.post("/api/billing/cancel")
@@ -82,15 +241,7 @@ async def cancel_subscription(body: CancelRequest, request: Request):
     user = await get_current_user_required(request)
     if body.reason not in CANCEL_REASONS:
         raise HTTPException(status_code=422, detail="Pick a reason from the list.")
-
-    async with database.session() as session:
-        sub = (await session.execute(
-            select(Subscription).where(Subscription.user_id == user.id)
-        )).scalar_one_or_none()
-    if not sub or sub.status not in CANCELLABLE_STATES:
-        raise HTTPException(status_code=409, detail="There is no active subscription to cancel.")
-    if sub.cancel_at_period_end:
-        raise HTTPException(status_code=409, detail="Your subscription is already set to cancel.")
+    sub = await _renewing_sub(user.id)
 
     details, review = _clean(body.details), _clean(body.review)
     # Stripe caps the comment at 5000 chars; ours are 2000 each.
@@ -119,6 +270,7 @@ async def cancel_subscription(body: CancelRequest, request: Request):
                 reason=body.reason, details=details,
                 rating=body.rating, review=review,
                 review_public_ok=bool(body.review_public_ok and review),
+                outcome="canceled",
             ))
             row = (await session.execute(
                 select(Subscription).where(Subscription.id == sub.id).with_for_update()
