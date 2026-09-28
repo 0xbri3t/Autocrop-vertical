@@ -112,6 +112,7 @@ class UsageLedger(Base):
     __table_args__ = (
         Index("ix_usage_user_status", "user_id", "status"),
         Index("ix_usage_user_period_status", "user_id", "period_end", "status"),
+        Index("ix_usage_job_id", "job_id"),
     )
 
 
@@ -410,3 +411,19 @@ class LifecycleEmail(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "kind", name="uq_lifecycle_user_kind"),
     )
+
+
+class FirstVideoGrant(Base):
+    """One free first video clipped whole (app.free_overflow), by client IP.
+
+    Keyed on an HMAC of the IP, not the IP, and deliberately NOT tied to the
+    user row: deleting an account must not hand its network a fresh grant.
+    Rows past ``FIRST_VIDEO_IP_WINDOW_DAYS`` are deleted on the next grant.
+    A grant only counts while its job's reservation is live, so a first video
+    that fails does not use up the network's grant.
+    """
+    __tablename__ = "first_video_grants"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    ip_hash = Column(String(64), nullable=False, index=True)
+    job_id = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

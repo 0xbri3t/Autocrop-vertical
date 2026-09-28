@@ -29,7 +29,7 @@ from decimal import Decimal
 from sqlalchemy import select, update, func, and_
 
 from . import config, database
-from .models import User, Subscription, CreditTopup, UsageLedger
+from .models import User, Subscription, CreditTopup, UsageLedger, FirstVideoGrant
 
 
 SWEEP_INTERVAL_SECONDS = 15 * 60
@@ -454,6 +454,47 @@ async def has_processed_before(user_id) -> bool:
             )).limit(1)
         )).first()
     return row is not None
+
+
+def ip_fingerprint(ip) -> str:
+    """HMAC of a client IP (keyed on the app secret), or "" when unknown."""
+    import hashlib
+    import hmac
+    if not ip or ip == "unknown":
+        return ""
+    key = (config.settings.jwt_secret or "openshorts").encode()
+    return hmac.new(key, f"ip:{ip}".encode(), hashlib.sha256).hexdigest()
+
+
+async def ip_had_first_video(ip_hash: str) -> bool:
+    """True when this network already got a live first-video grant inside
+    ``FIRST_VIDEO_IP_WINDOW_DAYS``."""
+    if not ip_hash:
+        return False
+    since = _now() - timedelta(days=config.FIRST_VIDEO_IP_WINDOW_DAYS)
+    async with database.session() as session:
+        row = (await session.execute(
+            select(FirstVideoGrant.id)
+            .join(UsageLedger, UsageLedger.job_id == FirstVideoGrant.job_id)
+            .where(and_(
+                FirstVideoGrant.ip_hash == ip_hash,
+                FirstVideoGrant.created_at >= since,
+                UsageLedger.status.in_(("reserved", "committed")),
+            )).limit(1)
+        )).first()
+    return row is not None
+
+
+async def record_first_video(ip_hash: str, job_id: str):
+    """Remember a first-video grant for this network; prune expired rows."""
+    if not ip_hash:
+        return
+    from sqlalchemy import delete
+    since = _now() - timedelta(days=config.FIRST_VIDEO_IP_WINDOW_DAYS)
+    async with database.session() as session:
+        async with session.begin():
+            await session.execute(delete(FirstVideoGrant).where(FirstVideoGrant.created_at < since))
+            session.add(FirstVideoGrant(ip_hash=ip_hash, job_id=job_id))
 
 
 async def _topups_fifo(session, user_id):

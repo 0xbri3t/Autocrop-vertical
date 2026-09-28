@@ -98,6 +98,11 @@ PARTIAL_MIN_MINUTES = 5
 # the first N minutes automatically instead of hitting the wall.
 # 0 disables the grant.
 FIRST_VIDEO_MAX_MINUTES = 60
+# ...and once per client IP in this many days, whatever the account: a pile of
+# Google accounts from one network gets one whole first video, and the rest
+# fall back to the first-N-minutes cut. The IP is kept only as an HMAC
+# (cloud/metering.ip_fingerprint) and rows older than the window are deleted.
+FIRST_VIDEO_IP_WINDOW_DAYS = 30
 
 # Minute cap DURING the trial (across all plans). Kept for grandfathered
 # 'trialing' subscriptions; removable once no subscription has status

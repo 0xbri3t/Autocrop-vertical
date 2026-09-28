@@ -194,7 +194,11 @@ own (the client sends no `max_minutes`):
   the floored balance is reserved (it lands at zero) and the download's safety
   cap (`SOURCE_CAP_MINUTES`) is the probed length, not the reservation. Once
   per account: `metering.has_processed_before` (any reserved/committed
-  `process` row; a released one keeps the grant for the retry). The response
+  `process` row; a released one keeps the grant for the retry), and once per
+  client IP every `FIRST_VIDEO_IP_WINDOW_DAYS` (30): `first_video_grants`
+  holds an HMAC of the IP (never the IP), is not tied to the user row so an
+  account deletion does not reset it, and only counts grants whose job
+  reservation is live. A blocked network gets the first-N-minutes cut. The response
   carries `first_video: true`; the dashboard says so and tracks
   `FirstVideoGrant`.
 - **Anything else:** `max_minutes` becomes the balance, so the job clips the

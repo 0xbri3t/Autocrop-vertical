@@ -432,8 +432,15 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
     # FIRST_VIDEO_MAX_MINUTES) is clipped whole for the balance; any other is
     # clipped to the first N minutes. Neither sees the wall.
     grant = None
+    ip_hash = ""
     if balance.get("plan") == "free" and minutes > balance["remaining"] and max_minutes is None:
         processed_before = await _metering.has_processed_before(user.id)
+        if not processed_before:
+            # One whole first video per network (FIRST_VIDEO_IP_WINDOW_DAYS),
+            # so a stack of Google accounts from one IP gets one, not many.
+            ip_hash = _metering.ip_fingerprint(request.client.host if request.client else "")
+            if await _metering.ip_had_first_video(ip_hash):
+                processed_before = True
         grant, max_minutes = free_overflow("free", minutes, balance["remaining"],
                                            max_minutes, processed_before)
 
@@ -451,6 +458,11 @@ async def reserve_process_minutes(request, url, input_path, job_id, max_minutes=
         # first video is processed whole, so its cap is the probed length.
         request.state.reserved_minutes = minutes if grant is not None else reserve
         request.state.first_video = grant is not None
+        if grant is not None:
+            try:
+                await _metering.record_first_video(ip_hash, job_id)
+            except Exception as e:  # the grant stands; only the IP memory is lost
+                print(f"⚠️  Could not record first-video grant: {e}")
     except _metering.QuotaExceeded as e:
         _maybe_send_quota_email(user)
         raise HTTPException(status_code=402, detail={
