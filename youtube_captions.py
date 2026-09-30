@@ -25,18 +25,40 @@ def enabled() -> bool:
     return os.environ.get("YOUTUBE_CAPTIONS", "1").strip() != "0"
 
 
+def spoken_language(info: dict) -> str:
+    """The video's original spoken language, or "" when unknown.
+
+    The unprocessed info yt-dlp hands the downloader has no ``language``;
+    the original audio track is the format with the highest
+    ``language_preference`` (10 for "original", -1 for YouTube's auto-dubs).
+    """
+    if info.get("language"):
+        return info["language"]
+    best = None
+    for fmt in info.get("formats") or []:
+        lang, pref = fmt.get("language"), fmt.get("language_preference")
+        if lang and pref is not None and (best is None or pref > best[0]):
+            best = (pref, lang)
+    return best[1] if best else ""
+
+
 def asr_track(info: dict):
     """``(json3_url, language)`` of the video's ASR caption track, or ``(None, None)``.
 
     ``<lang>-orig`` is the ASR track itself; every other key in
     ``automatic_captions`` is a machine translation of it and never used.
     Without the ``-orig`` key, the plain code of the spoken language is the
-    ASR track.
+    ASR track. An auto-dubbed video has one ``-orig`` track per dub, so
+    with the spoken language unknown only a lone ``-orig`` track is trusted:
+    picking the first one read an English podcast as Arabic.
     """
     auto = info.get("automatic_captions") or {}
-    spoken = info.get("language") or ""
-    keys = [f"{spoken}-orig", spoken] if spoken else []
-    keys += [k for k in auto if k.endswith("-orig")]
+    spoken = spoken_language(info)
+    base = spoken.split("-")[0]
+    keys = [f"{spoken}-orig", f"{base}-orig", spoken, base] if spoken else []
+    orig = [k for k in auto if k.endswith("-orig")]
+    if not spoken and len(orig) == 1:
+        keys = orig
     for key in keys:
         fmt = next((f for f in auto.get(key) or [] if f.get("ext") == "json3"), None)
         if fmt and fmt.get("url"):

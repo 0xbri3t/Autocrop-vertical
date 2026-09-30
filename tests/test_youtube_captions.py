@@ -34,6 +34,28 @@ class TestAsrTrack:
             "es-419": [{"ext": "vtt", "url": "x"}, {"ext": "json3", "url": "asr"}]}}
         assert yc.asr_track(info) == ("asr", "es")
 
+    def test_auto_dubbed_video_uses_the_original_audio_language(self):
+        # Seen on a real English podcast: 19 "-orig" tracks, one per dub,
+        # and no info["language"] in the unprocessed info.
+        info = {"formats": [
+                    {"language": "ar", "language_preference": -1},
+                    {"language": "en-US", "language_preference": 10},
+                    {"language": "de-DE", "language_preference": -1}],
+                "automatic_captions": {
+                    "ar-orig": [{"ext": "json3", "url": "arabic"}],
+                    "en-orig": [{"ext": "json3", "url": "english"}],
+                    "de-DE-orig": [{"ext": "json3", "url": "german"}]}}
+        assert yc.asr_track(info) == ("english", "en")
+
+    def test_unknown_language_with_several_tracks_means_transcribe_locally(self):
+        info = {"automatic_captions": {"ar-orig": [{"ext": "json3", "url": "a"}],
+                                       "en-orig": [{"ext": "json3", "url": "e"}]}}
+        assert yc.asr_track(info) == (None, None)
+
+    def test_unknown_language_with_one_track_uses_it(self):
+        info = {"automatic_captions": {"en-orig": [{"ext": "json3", "url": "e"}]}}
+        assert yc.asr_track(info) == ("e", "en")
+
     def test_none_without_asr_track(self):
         info = {"language": "en", "subtitles": {"en": [{"ext": "json3", "url": "human"}]},
                 "automatic_captions": {"fr": [{"ext": "json3", "url": "translated"}]}}
