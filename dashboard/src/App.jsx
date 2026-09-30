@@ -521,6 +521,23 @@ function App() {
     setActiveTab('dashboard');
   };
 
+  // Self-host: reopen a run straight from this server's disk, where
+  // /api/status already rebuilds it with its latest clip files and source.
+  const reopenLocalJob = async (localJobId) => {
+    const data = await apiJson(`/api/status/${localJobId}`);
+    flushClipState();
+    setProjectState(null);
+    setNoSource(false);
+    setJobId(localJobId);
+    setResults(data.result || null);
+    setLogs(data.logs || []);
+    setLogTimes(data.log_times || []);
+    setProcessingMedia(null);
+    setQualityGate(null);
+    setStatus('complete');
+    setActiveTab('dashboard');
+  };
+
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
@@ -1001,7 +1018,10 @@ function App() {
         // Set when the user took the quota wall's "clip the first N minutes"
         // offer: the server reserves N minutes and cuts the source to them.
         max_minutes: data.maxMinutes || null,
+        // Self-host: schedule the best clips on Upload-Post when it finishes.
+        auto_post: data.autoPost || null,
       };
+      if (data.autoPost && uploadPostKey) headers['X-Upload-Post-Key'] = uploadPostKey;
 
       if (data.type === 'url') {
         headers['Content-Type'] = 'application/json';
@@ -1028,7 +1048,7 @@ function App() {
         formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
         formData.append('output_format', data.outputFormat || 'auto');
         for (const [k, v] of Object.entries(advanced)) {
-          if (v != null) formData.append(k, v);
+          if (v != null) formData.append(k, typeof v === 'object' ? JSON.stringify(v) : v);
         }
         body = formData;
       }
@@ -1149,7 +1169,7 @@ function App() {
     { id: 'ai-agent', ord: '04', icon: Bot, label: 'AI Agent', short: 'agent', byok: true },
     { id: 'ugc-gallery', ord: '05', icon: LayoutGrid, label: 'UGC Gallery', short: 'gallery', primary: true },
     { id: 'thumbnails', ord: '06', icon: Image, label: 'YouTube Studio', short: 'studio', primary: true },
-    ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
+    ...(isSignedIn || !billingEnabled ? [{ id: 'history', ord: '07', icon: History, label: 'History', short: 'history' }] : []),
     { id: 'settings', ord: '08', icon: Settings, label: 'Settings', short: 'settings' },
   ];
   const activeNav = navItems.find((n) => n.id === activeTab);
@@ -1895,7 +1915,9 @@ function App() {
           {activeTab === 'history' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-4 sm:p-6 md:p-8">
-                <HistoryTab onReopenProject={restoreProject} />
+                {billingEnabled
+                  ? <HistoryTab onReopenProject={restoreProject} />
+                  : <HistoryTab local retention={jobRetentionSeconds > 0 ? formatRetention(jobRetentionSeconds) : ''} onReopenProject={reopenLocalJob} />}
               </div>
             </div>
           )}
@@ -1952,7 +1974,12 @@ function App() {
                   )}
                 </div>
 
-                <MediaInput onProcess={handleProcess} isProcessing={status === 'processing'} />
+                <MediaInput
+                  onProcess={handleProcess}
+                  isProcessing={status === 'processing'}
+                  autoPostProfiles={billingEnabled ? null : userProfiles}
+                  defaultProfile={uploadUserId}
+                />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">
                   <span className="flex items-center gap-2"><Youtube size={16} /> YouTube</span>

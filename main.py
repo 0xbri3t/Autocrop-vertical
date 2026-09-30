@@ -2416,6 +2416,10 @@ if __name__ == '__main__':
             # basename is enough — the file sits in the job dir (URL jobs with
             # --keep-original) or in uploads/ (upload jobs).
             clips_data['source_video'] = os.path.basename(input_video)
+            if args.url:
+                # Which video the clips came from, for the posted-clips ledger
+                # (auto_post.record_posted) of a job recovered after a restart.
+                clips_data['source_url'] = args.url.strip()
             clips_data['output_format'] = output_format
             metadata_file = os.path.join(output_dir, f"{video_title}_metadata.json")
             with open(metadata_file, 'w') as f:
