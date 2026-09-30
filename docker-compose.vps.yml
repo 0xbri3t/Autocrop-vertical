@@ -1,0 +1,42 @@
+# Private self-host on a VPS: one password in front of everything.
+# Usage:
+#   docker run --rm caddy:2.11.4-alpine caddy hash-password --plaintext 'your-password'
+#   # .env: DOMAIN=clips.example.com  AUTH_USER=you  AUTH_HASH='<hash, in single quotes>'
+#   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+#
+# Only Caddy publishes ports (80/443, HTTPS certificates are automatic for a
+# real DOMAIN). The backend, frontend and renderer stop listening on the host,
+# so the password cannot be bypassed by hitting :8000 directly.
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    container_name: openshorts-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - "DOMAIN=${DOMAIN:-localhost}"
+      - "AUTH_USER=${AUTH_USER:?AUTH_USER must be set, the VPS deploy has no other login}"
+      - "AUTH_HASH=${AUTH_HASH:?AUTH_HASH must be set (caddy hash-password), in single quotes in .env}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+
+  backend:
+    ports: !reset []
+
+  frontend:
+    build:
+      target: prod
+    ports: !reset []
+    volumes: !reset []
+
+  renderer:
+    ports: !reset []
+
+volumes:
+  caddy_data:
