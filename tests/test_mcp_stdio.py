@@ -26,13 +26,17 @@ MESSAGES = [
 
 
 @pytest.fixture(scope="module")
-def responses():
+def responses(tmp_path_factory):
     env = dict(os.environ, BILLING_ENABLED="0", PYTHONPATH=REPO)
     env.pop("PROXY_URL", None)
+    # Not cwd=REPO: the app's startup stamps output/.instance and resumes the
+    # manifests it finds there, which on a dev machine is the live stack's
+    # output/ — a running backend then sees a "newer instance" and drains.
     proc = subprocess.run(
         [sys.executable, "-u", os.path.join(REPO, "mcp_stdio.py")],
         input="".join(json.dumps(m) + "\n" for m in MESSAGES),
-        capture_output=True, text=True, cwd=REPO, env=env, timeout=300,
+        capture_output=True, text=True, cwd=tmp_path_factory.mktemp("mcp_stdio"),
+        env=env, timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
