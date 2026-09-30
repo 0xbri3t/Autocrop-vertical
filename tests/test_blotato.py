@@ -128,15 +128,15 @@ class TestSubmit:
 
     def test_one_supported_platform_per_channel(self, monkeypatch):
         monkeypatch.setenv("BLOTATO_API_KEY", "k")
-        assert self._resolve({**self.OPTS, "platforms": ["tiktok"]})[0]["platforms"] == ["tiktok"]
+        assert self._resolve({**self.OPTS, "platforms": ["tiktok"]})[0][0]["platforms"] == ["tiktok"]
         for bad in (["instagram"], ["youtube", "tiktok"]):
             with pytest.raises(HTTPException):
                 self._resolve({**self.OPTS, "platforms": bad})
 
     def test_accepted_without_an_upload_post_key(self, monkeypatch):
         monkeypatch.setenv("BLOTATO_API_KEY", "k")
-        opts, key = self._resolve(self.OPTS)
-        assert opts["user_id"] == "blotato:51821" and key is None
+        channels, key = self._resolve(self.OPTS)
+        assert channels[0]["user_id"] == "blotato:51821" and key is None
 
 
 def test_blotato_channel_is_scheduled_through_blotato_and_recorded(tmp_path, monkeypatch):
@@ -157,7 +157,7 @@ def test_blotato_channel_is_scheduled_through_blotato_and_recorded(tmp_path, mon
     assert (key, channel, platform, title, text, when) == (
         "k", "blotato:51821", "youtube", "T", "D", "2026-09-30T13:43:00Z")
     assert path.endswith("j/c.mp4")
-    assert app.auto_post.posted_ranges(app._POSTED_LEDGER, "h5TP6tAVP24") == [(10.0, 40.0)]
+    assert app.auto_post.posted_ranges(app._POSTED_LEDGER, "h5TP6tAVP24", "blotato:51821") == [(10.0, 40.0)]
 
 
 def test_a_blotato_rejection_is_not_retried(tmp_path, monkeypatch):

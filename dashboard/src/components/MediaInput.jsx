@@ -32,18 +32,22 @@ const readVideoDuration = (file) => new Promise((resolve) => {
 
 const AUTO_POST_INTERVALS = [1, 2, 3, 4, 6, 12, 24];
 
+// channels: {<channel id>: <hours between posts>} for every ticked channel.
+const AUTO_POST_DEFAULTS = { on: false, clips: 3, channels: {} };
+
 const readAutoPostPrefs = () => {
     try {
-        return { on: false, excluded: [], clips: 3, hours: 3, ...JSON.parse(localStorage.getItem('os_auto_post') || '{}') };
+        const saved = JSON.parse(localStorage.getItem('os_auto_post') || '{}');
+        return { ...AUTO_POST_DEFAULTS, ...saved, channels: saved.channels || {} };
     } catch {
-        return { on: false, excluded: [], clips: 3, hours: 3 };
+        return AUTO_POST_DEFAULTS;
     }
 };
 
-// autoPostProfiles (self-host only): the Upload-Post profiles, one per
-// channel, as [{username, connected}]; null hides auto-post entirely (cloud
-// has Autopilot). defaultProfile is the one picked in the header.
-export default function MediaInput({ onProcess, isProcessing, autoPostProfiles = null, defaultProfile = '' }) {
+// autoPostProfiles (self-host only): every channel auto-post can reach, as
+// [{username, label?, connected}]: Upload-Post profiles and Blotato accounts.
+// null hides auto-post entirely (cloud has Autopilot).
+export default function MediaInput({ onProcess, isProcessing, autoPostProfiles = null }) {
     const [youtubeUrlEnabled, setYoutubeUrlEnabled] = useState(true);
     // File upload is the primary path; the link is secondary.
     const [mode, setMode] = useState('file'); // 'file' | 'url'
@@ -75,18 +79,19 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
     const [layout, setLayout] = useState(() => {
         try { return localStorage.getItem('os_layout') || 'auto'; } catch { return 'auto'; }
     });
-    // Auto-post: schedule the best clips on Upload-Post when the job finishes.
-    // Platforms are stored as the ones switched OFF, so a network connected
-    // later is on by default.
+    // Auto-post: when the job finishes, schedule its best clips on every
+    // ticked channel (a brand's YouTube and TikTok), each at its own pace.
     const [autoPost, setAutoPost] = useState(readAutoPostPrefs);
-    const profiles = autoPostProfiles || [];
-    const channel = profiles.find((p) => p.username === autoPost.profile)
-        || profiles.find((p) => p.username === defaultProfile) || profiles[0] || null;
-    const connected = channel?.connected || [];
-    const canAutoPost = !!channel && connected.length > 0;
-    const autoPostPlatforms = connected.filter((p) => !autoPost.excluded.includes(p));
-    const autoPostActive = canAutoPost && autoPost.on && autoPostPlatforms.length > 0;
+    const postable = (autoPostProfiles || []).filter((p) => p.connected?.length);
+    const ticked = postable.filter((p) => autoPost.channels[p.username] != null);
+    const autoPostActive = autoPost.on && ticked.length > 0;
     const updateAutoPost = (patch) => setAutoPost((prev) => ({ ...prev, ...patch }));
+    const setChannelHours = (username, hours) => setAutoPost((prev) => {
+        const channels = { ...prev.channels };
+        if (hours == null) delete channels[username];
+        else channels[username] = hours;
+        return { ...prev, channels };
+    });
     const infoRef = useRef(null);
 
     // Close the compatibility popover on any outside click.
@@ -150,12 +155,12 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
             autoHook,
             autoHookStyle,
             layout,
-            autoPost: autoPostActive ? {
-                platforms: autoPostPlatforms,
-                user_id: channel.username,
+            autoPost: autoPostActive ? ticked.map((p) => ({
+                platforms: p.connected,
+                user_id: p.username,
                 clips: Number(autoPost.clips) || 3,
-                interval_hours: Number(autoPost.hours) || 3,
-            } : null,
+                interval_hours: Number(autoPost.channels[p.username]) || 3,
+            })) : null,
         };
         try {
             localStorage.setItem('os_auto_post', JSON.stringify(autoPost));
@@ -425,56 +430,21 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
                                     <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
                                         <input
                                             type="checkbox"
-                                            checked={autoPost.on && canAutoPost}
-                                            disabled={!canAutoPost}
+                                            checked={autoPost.on && postable.length > 0}
+                                            disabled={postable.length === 0}
                                             onChange={(e) => updateAutoPost({ on: e.target.checked })}
                                             className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer disabled:cursor-not-allowed"
                                         />
                                         auto-post the best clips when it finishes
                                     </label>
-                                    {profiles.length > 0 && (
-                                        <div className="flex flex-wrap items-center gap-2 text-xs text-ink2">
-                                            <span>channel</span>
-                                            <select
-                                                value={channel?.username || ''}
-                                                onChange={(e) => updateAutoPost({ profile: e.target.value })}
-                                                className="input-field !w-auto text-xs py-1.5"
-                                                aria-label="channel to post to"
-                                            >
-                                                {profiles.map((p) => (
-                                                    <option key={p.username} value={p.username}>
-                                                        {p.label || p.username} · {p.connected?.length ? p.connected.join(', ') : 'nothing connected'}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    )}
-                                    {!canAutoPost && (
+                                    {postable.length === 0 && (
                                         <p className="text-[11px] leading-relaxed text-muted">
-                                            {profiles.length === 0
-                                                ? 'Save your Upload-Post key in Settings to auto-post.'
-                                                : `Connect a network to "${channel?.label || channel?.username}", or pick another channel.`}
+                                            Connect a channel on Blotato (BLOTATO_API_KEY) or save an Upload-Post
+                                            key in Settings to auto-post.
                                         </p>
                                     )}
-                                    {canAutoPost && autoPost.on && (
+                                    {postable.length > 0 && autoPost.on && (
                                         <>
-                                            <div className="flex flex-wrap gap-4">
-                                                {connected.map((p) => (
-                                                    <label key={p} className="flex items-center gap-1.5 text-xs text-ink2 cursor-pointer select-none">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={!autoPost.excluded.includes(p)}
-                                                            onChange={(e) => updateAutoPost({
-                                                                excluded: e.target.checked
-                                                                    ? autoPost.excluded.filter((x) => x !== p)
-                                                                    : [...autoPost.excluded, p],
-                                                            })}
-                                                            className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
-                                                        />
-                                                        {p}
-                                                    </label>
-                                                ))}
-                                            </div>
                                             <div className="flex flex-wrap items-center gap-2 text-xs text-ink2">
                                                 <span>top</span>
                                                 <input
@@ -484,22 +454,44 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
                                                     className="input-field !w-16 text-xs py-1.5"
                                                     aria-label="clips to post"
                                                 />
-                                                <span>clips, one every</span>
-                                                <select
-                                                    value={autoPost.hours}
-                                                    onChange={(e) => updateAutoPost({ hours: Number(e.target.value) })}
-                                                    className="input-field !w-auto text-xs py-1.5"
-                                                    aria-label="hours between posts"
-                                                >
-                                                    {AUTO_POST_INTERVALS.map((h) => (
-                                                        <option key={h} value={h}>{h} h</option>
-                                                    ))}
-                                                </select>
+                                                <span>clips to each ticked channel:</span>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                {postable.map((p) => {
+                                                    const hours = autoPost.channels[p.username];
+                                                    const name = `${p.label || p.username} · ${p.connected.join(', ')}`;
+                                                    return (
+                                                        <div key={p.username} className="flex flex-wrap items-center justify-between gap-2">
+                                                            <label className="flex items-center gap-2 text-xs text-ink2 cursor-pointer select-none">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={hours != null}
+                                                                    onChange={(e) => setChannelHours(p.username, e.target.checked ? 3 : null)}
+                                                                    className="w-4 h-4 shrink-0 accent-[var(--color-accent)] cursor-pointer"
+                                                                    aria-label={`post to ${name}`}
+                                                                />
+                                                                {name}
+                                                            </label>
+                                                            {hours != null && (
+                                                                <select
+                                                                    value={hours}
+                                                                    onChange={(e) => setChannelHours(p.username, Number(e.target.value))}
+                                                                    className="input-field !w-auto text-xs py-1"
+                                                                    aria-label={`hours between posts on ${name}`}
+                                                                >
+                                                                    {AUTO_POST_INTERVALS.map((h) => (
+                                                                        <option key={h} value={h}>one every {h} h</option>
+                                                                    ))}
+                                                                </select>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
                                             </div>
                                             <p className="text-[11px] leading-relaxed text-muted">
-                                                Each channel has its own posting calendar: clips follow the last
-                                                one already scheduled on that channel, and channels post in parallel.
-                                                {autoPostPlatforms.length === 0 && ' Pick at least one network.'}
+                                                Each channel has its own calendar: its clips follow the last one
+                                                already scheduled there, and never repeat a moment it already posted.
+                                                {ticked.length === 0 && ' Tick at least one channel.'}
                                             </p>
                                             {Number(targetClips) > 0 && Number(targetClips) < Number(autoPost.clips) && (
                                                 <p className="text-[11px] leading-relaxed text-brass">
@@ -507,7 +499,8 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
                                                     posted. Raise it to {autoPost.clips} or leave it blank.
                                                 </p>
                                             )}
-                                            {autoPostPlatforms.includes('tiktok') && <TikTokDraftNotice />}
+                                            {ticked.some((p) => !p.username.startsWith('blotato:') && p.connected.includes('tiktok'))
+                                                && <TikTokDraftNotice />}
                                         </>
                                     )}
                                 </div>

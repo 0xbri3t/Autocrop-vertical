@@ -1291,7 +1291,7 @@ def _resume_interrupted_jobs() -> set:
             'webhook_url': m.get("webhook_url"),
             'webhook_secret': m.get("webhook_secret"),
             'base_url': m.get("base_url"),
-            'auto_post': m.get("auto_post"),
+            'auto_post': auto_post.as_list(m.get("auto_post")),
         }
         _enqueue_job(job_id, int(m.get("priority", 2)))
         resumed += 1
@@ -2050,7 +2050,8 @@ async def _notify_job_webhook(job_id):
 
 
 # --- Self-host auto-post -------------------------------------------------------
-# /api/process takes `auto_post` ({platforms, user_id, clips, interval_hours});
+# /api/process takes `auto_post`: one {platforms, user_id, clips, interval_hours}
+# per channel (a list, or one object);
 # when the job completes, its best clips are scheduled on Upload-Post, spaced
 # on its channel's own calendar (auto_post.claim_slots). Cloud has Autopilot.
 _AUTO_POST_CALENDAR = os.path.join(OUTPUT_DIR, ".autopost.json")
@@ -2064,32 +2065,35 @@ _AUTO_POST_RETRY_SECONDS = 60
 
 
 async def _resolve_auto_post(request, raw):
-    """Validate a submit's auto_post option: ``(options, upload_key)`` or
-    ``(None, None)``. The key is checked now so a job never renders for an
+    """Validate a submit's auto_post option: ``(channels, upload_key)`` or
+    ``(None, None)``. Keys are checked now so a job never renders for an
     hour only to find it cannot post."""
     try:
-        opts = auto_post.parse_options(raw)
+        channels = auto_post.parse_options(raw)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    if opts is None:
+    if channels is None:
         return None, None
     if BILLING_ENABLED:
         raise HTTPException(status_code=400,
                             detail="auto_post is for self-hosted servers; use Autopilot instead.")
-    if blotato.is_channel(opts['user_id']):
+    for opts in channels:
+        if not blotato.is_channel(opts['user_id']):
+            continue
         if not blotato.api_key():
             raise HTTPException(status_code=400, detail=(
                 "Posting to a Blotato channel needs BLOTATO_API_KEY on the server."))
         if len(opts['platforms']) != 1 or opts['platforms'][0] not in blotato.PLATFORMS:
             raise HTTPException(status_code=400, detail=(
                 f"A Blotato channel is one account: pick one of {', '.join(blotato.PLATFORMS)}."))
-        return opts, None  # read from the env at post time, so it survives a restart
+    if all(blotato.is_channel(opts['user_id']) for opts in channels):
+        return channels, None  # Blotato's key is read from the env at post time
     key, _ = await resolve_upload_post(request, None)
     if not key:
         raise HTTPException(status_code=400, detail=(
             "auto_post needs an Upload-Post key: save it in Settings "
             "or set UPLOAD_POST_API_KEY on the server."))
-    return opts, key
+    return channels, key
 
 
 def _job_source(job_id):
@@ -2118,43 +2122,50 @@ def _start_auto_post(job_id, job):
 
 
 async def _auto_post_job(job_id, job):
-    opts = job['auto_post']
+    for opts in auto_post.as_list(job['auto_post']):
+        await _auto_post_channel(job_id, job, opts)
+
+
+async def _auto_post_channel(job_id, job, opts):
+    """Schedule the job's best clips on one channel, on that channel's calendar."""
     logs = job['logs']
-    if blotato.is_channel(opts['user_id']):
+    channel = opts['user_id']
+    if blotato.is_channel(channel):
         key = blotato.api_key()
         missing = "has no BLOTATO_API_KEY. Set it"
     else:
         key = job.get('auto_post_key') or os.environ.get("UPLOAD_POST_API_KEY")
         missing = "restarted and has no Upload-Post key. Set UPLOAD_POST_API_KEY"
     if not key:
-        logs.append(f"⚠️ Auto-post skipped: the server {missing}, "
+        logs.append(f"⚠️ Auto-post to {channel} skipped: the server {missing}, "
                     f"or schedule these clips from the results.")
         return
     clips = (job.get('result') or {}).get('clips') or []
-    posted = auto_post.posted_ranges(_POSTED_LEDGER, _job_source(job_id))
+    posted = auto_post.posted_ranges(_POSTED_LEDGER, _job_source(job_id), channel)
     repeats = [i for i, c in enumerate(clips) if auto_post.overlaps_posted(c, posted)]
     if repeats:
-        logs.append(f"⏭️ Skipping clip(s) {', '.join(str(i + 1) for i in repeats)}: "
-                    f"already posted from this video.")
+        logs.append(f"⏭️ Skipping clip(s) {', '.join(str(i + 1) for i in repeats)} on {channel}: "
+                    f"already posted there from this video.")
     picked = auto_post.pick_clips(clips, opts['clips'], posted)
-    slots = auto_post.claim_slots(_AUTO_POST_CALENDAR, opts['user_id'], len(picked),
+    slots = auto_post.claim_slots(_AUTO_POST_CALENDAR, channel, len(picked),
                                   opts['interval_hours'])
+    where = f"{channel} ({', '.join(opts['platforms'])})"
     for index, slot in zip(picked, slots):
         clip = clips[index]
         when = slot.strftime("%Y-%m-%d %H:%M")
         for attempt in range(1, _AUTO_POST_ATTEMPTS + 1):
             try:
                 await _schedule_clip(job_id, clip, key, opts, slot)
-                logs.append(f"📅 Clip {index + 1} scheduled for {when} UTC on "
-                            f"{', '.join(opts['platforms'])}.")
+                logs.append(f"📅 Clip {index + 1} scheduled for {when} UTC on {where}.")
                 break
-            except HTTPException as e:  # Upload-Post answered: retrying will not change it
-                logs.append(f"⚠️ Clip {index + 1} could not be scheduled for {when} UTC: {e.detail}")
+            except HTTPException as e:  # the provider answered: retrying will not change it
+                logs.append(f"⚠️ Clip {index + 1} could not be scheduled for {when} UTC "
+                            f"on {where}: {e.detail}")
                 break
             except Exception as e:  # network (DNS, timeout, reset): worth another try
                 if attempt == _AUTO_POST_ATTEMPTS:
                     logs.append(f"⚠️ Clip {index + 1} could not be scheduled for {when} UTC "
-                                f"after {attempt} attempts: {e}")
+                                f"on {where} after {attempt} attempts: {e}")
                     break
                 await asyncio.sleep(_AUTO_POST_RETRY_SECONDS)
 
@@ -2181,7 +2192,7 @@ async def _schedule_clip(job_id, clip, key, opts, slot):
         if not e.retryable:
             raise HTTPException(status_code=502, detail=str(e))
         raise
-    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), clip)
+    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), opts['user_id'], clip)
 
 
 async def _settle_reservation(job_id, job=None):
@@ -5502,7 +5513,7 @@ async def _upload_clip(job_id, clip, upload_key, post_user, platforms, title=Non
         print(f"❌ Upload-Post Error: {response.text}")
         raise HTTPException(status_code=response.status_code,
                             detail=f"Vendor API Error: {response.text}")
-    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), clip)
+    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), post_user, clip)
     return response.json()
 
 

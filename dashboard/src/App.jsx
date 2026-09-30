@@ -1990,7 +1990,6 @@ function App() {
                   onProcess={handleProcess}
                   isProcessing={status === 'processing'}
                   autoPostProfiles={billingEnabled ? null : [...userProfiles, ...blotatoChannels]}
-                  defaultProfile={uploadUserId}
                 />
 
                 <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-8 text-muted text-xs sm:text-sm">

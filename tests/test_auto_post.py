@@ -25,7 +25,21 @@ class TestParseOptions:
 
     def test_accepts_json_string_from_a_form_field(self):
         opts = auto_post.parse_options('{"platforms": ["tiktok"], "user_id": " me "}')
-        assert opts == {"platforms": ["tiktok"], "user_id": "me", "clips": 3, "interval_hours": 3.0}
+        assert opts == [{"platforms": ["tiktok"], "user_id": "me", "clips": 3, "interval_hours": 3.0}]
+
+    def test_a_list_is_one_entry_per_channel(self):
+        opts = auto_post.parse_options([{**VALID, "user_id": "yt", "interval_hours": 3},
+                                        {**VALID, "user_id": "tt", "interval_hours": 24}])
+        assert [(o["user_id"], o["interval_hours"]) for o in opts] == [("yt", 3.0), ("tt", 24.0)]
+
+    @pytest.mark.parametrize("raw", [
+        [VALID, VALID],  # same channel twice
+        [{**VALID, "user_id": f"c{i}"} for i in range(auto_post.MAX_CHANNELS + 1)],
+        ["not an object"],
+    ])
+    def test_rejects_bad_channel_lists(self, raw):
+        with pytest.raises(ValueError):
+            auto_post.parse_options(raw)
 
     @pytest.mark.parametrize("raw", [
         "{not json",
@@ -190,18 +204,20 @@ class TestPostedLedger:
 
     def test_ledger_round_trip(self, tmp_path):
         ledger = tmp_path / "posted.json"
-        assert auto_post.posted_ranges(ledger, "vid") == []
-        auto_post.record_posted(ledger, "vid", {"start": "10.5", "end": "40"})
-        auto_post.record_posted(ledger, "other", {"start": 1, "end": 2})
-        assert auto_post.posted_ranges(ledger, "vid") == [(10.5, 40.0)]
-        auto_post.record_posted(ledger, None, {"start": 1, "end": 2})  # uploads: no key
-        assert set(json.loads(ledger.read_text())) == {"vid", "other"}
+        assert auto_post.posted_ranges(ledger, "vid", "yt") == []
+        auto_post.record_posted(ledger, "vid", "yt", {"start": "10.5", "end": "40"})
+        auto_post.record_posted(ledger, "other", "yt", {"start": 1, "end": 2})
+        assert auto_post.posted_ranges(ledger, "vid", "yt") == [(10.5, 40.0)]
+        assert auto_post.posted_ranges(ledger, "vid", "tt") == []  # another account
+        auto_post.record_posted(ledger, None, "yt", {"start": 1, "end": 2})  # uploads: no key
+        assert set(json.loads(ledger.read_text())) == {"vid@yt", "other@yt"}
 
 
 def test_rerun_skips_a_moment_already_posted_and_fills_with_the_next(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "_AUTO_POST_CALENDAR", str(tmp_path / "cal.json"))
     monkeypatch.setattr(app, "_POSTED_LEDGER", str(tmp_path / "posted.json"))
-    auto_post.record_posted(app._POSTED_LEDGER, "LhllldUkiJU", {"start": 1378.58, "end": 1413.32})
+    auto_post.record_posted(app._POSTED_LEDGER, "LhllldUkiJU", "me",
+                            {"start": 1378.58, "end": 1413.32})
     monkeypatch.setitem(app.jobs, "rerun", {"cmd": ["/opt/venv/bin/python", "-u", "main.py", "-u",
                                                    " https://youtu.be/LhllldUkiJU"]})
     sent = []
@@ -222,3 +238,33 @@ def test_rerun_skips_a_moment_already_posted_and_fills_with_the_next(tmp_path, m
 
     assert sent == ["/b", "/c"]
     assert any("already posted" in line for line in job["logs"])
+
+
+def test_one_job_posts_to_each_channel_at_its_own_pace(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "_AUTO_POST_CALENDAR", str(tmp_path / "cal.json"))
+    monkeypatch.setattr(app, "_POSTED_LEDGER", str(tmp_path / "posted.json"))
+    monkeypatch.setitem(app.jobs, "j", {"cmd": ["python", "-u", "main.py", "-u", "https://youtu.be/LhllldUkiJU"]})
+    sent = []
+
+    async def fake_schedule(job_id, clip, key, opts, slot):
+        sent.append((opts["user_id"], clip["video_url"], slot))
+        auto_post.record_posted(app._POSTED_LEDGER, "LhllldUkiJU", opts["user_id"], clip)
+
+    monkeypatch.setattr(app, "_schedule_clip", fake_schedule)
+    job = {"status": "completed", "logs": app._TimedLog([]), "auto_post_key": "k",
+           "auto_post": [{**VALID, "user_id": "yt", "clips": 2, "interval_hours": 3},
+                         {**VALID, "user_id": "tt", "clips": 2, "interval_hours": 24}],
+           "result": {"clips": [{"video_url": "/a", "start": 0, "end": 30, "predicted_score": 90},
+                                {"video_url": "/b", "start": 60, "end": 90, "predicted_score": 80}]}}
+
+    asyncio.run(app._auto_post_job("j", job))
+
+    by_channel = {}
+    for channel, url, slot in sent:
+        by_channel.setdefault(channel, []).append((url, slot))
+    assert [u for u, _ in by_channel["yt"]] == ["/a", "/b"]
+    assert [u for u, _ in by_channel["tt"]] == ["/a", "/b"]  # posted on YouTube, still fresh for TikTok
+    (_, yt1), (_, yt2) = by_channel["yt"]
+    (_, tt1), (_, tt2) = by_channel["tt"]
+    assert yt2 - yt1 == timedelta(hours=3) and tt2 - tt1 == timedelta(hours=24)
+    assert yt1 == tt1  # each channel starts on its own calendar

@@ -15,6 +15,7 @@ FIRST_POST_DELAY = timedelta(minutes=10)
 MAX_CLIPS = 15
 MIN_INTERVAL_HOURS = 0.5
 MAX_INTERVAL_HOURS = 48
+MAX_CHANNELS = 10
 
 _calendar_lock = threading.Lock()
 
@@ -22,27 +23,46 @@ _calendar_lock = threading.Lock()
 def parse_options(raw):
     """Validate the ``auto_post`` field of /api/process.
 
-    Returns None when the field is absent, else
-    ``{"platforms", "user_id", "clips", "interval_hours"}``.
-    Raises ValueError with a message fit for a 400.
+    Returns None when the field is absent, else a list with one
+    ``{"platforms", "user_id", "clips", "interval_hours"}`` per channel: a job
+    can post to a brand's YouTube and TikTok, each at its own pace. A single
+    object is one channel. Raises ValueError with a message fit for a 400.
     """
-    if raw in (None, "", {}):
+    if raw in (None, "", {}, []):
         return None
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as e:
             raise ValueError(f"auto_post is not valid JSON: {e}") from e
-    if not isinstance(raw, dict):
-        raise ValueError("auto_post must be an object")
+    channels = [raw] if isinstance(raw, dict) else raw
+    if not isinstance(channels, list) or not all(isinstance(c, dict) for c in channels):
+        raise ValueError("auto_post must be an object or a list of objects")
+    if len(channels) > MAX_CHANNELS:
+        raise ValueError(f"auto_post takes at most {MAX_CHANNELS} channels")
+    parsed = [_parse_channel(c) for c in channels]
+    ids = [c["user_id"] for c in parsed]
+    if len(set(ids)) != len(ids):
+        raise ValueError("auto_post lists the same channel twice")
+    return parsed
 
+
+def as_list(opts):
+    """A job's auto_post as a list: resume manifests written before
+    multi-channel posting hold a single object."""
+    if not opts:
+        return None
+    return [opts] if isinstance(opts, dict) else opts
+
+
+def _parse_channel(raw):
     platforms = raw.get("platforms")
     if (not isinstance(platforms, list) or not platforms
             or any(p not in PLATFORMS for p in platforms)):
         raise ValueError(f"auto_post.platforms must be a non-empty list of {', '.join(PLATFORMS)}")
     profile = raw.get("user_id")
     if not isinstance(profile, str) or not profile.strip():
-        raise ValueError("auto_post.user_id must name your Upload-Post profile")
+        raise ValueError("auto_post.user_id must name the channel to post to")
     try:
         clips = int(raw.get("clips", 3))
         hours = float(raw.get("interval_hours", 3))
@@ -100,13 +120,19 @@ def source_key(url):
     return m.group(1) if m else url.strip()
 
 
-def posted_ranges(ledger_path, source):
-    """``[(start, end), ...]`` already posted from ``source``."""
+def _ledger_key(source, channel):
+    """One entry per source video AND channel: the rule is "never the same
+    moment twice on one account", so a clip on YouTube can still go to TikTok."""
+    return f"{source}@{channel}"
+
+
+def posted_ranges(ledger_path, source, channel):
+    """``[(start, end), ...]`` of ``source`` already posted on ``channel``."""
     if not source:
         return []
     try:
         with open(ledger_path) as f:
-            return [tuple(r) for r in json.load(f).get(source, [])]
+            return [tuple(r) for r in json.load(f).get(_ledger_key(source, channel), [])]
     except FileNotFoundError:
         return []
     except (ValueError, TypeError, AttributeError) as e:
@@ -114,8 +140,8 @@ def posted_ranges(ledger_path, source):
         return []
 
 
-def record_posted(ledger_path, source, clip):
-    """Remember that this clip's span of ``source`` has been posted."""
+def record_posted(ledger_path, source, channel, clip):
+    """Remember that this clip's span of ``source`` has been posted on ``channel``."""
     if not source:
         return
     with _calendar_lock:
@@ -124,7 +150,7 @@ def record_posted(ledger_path, source, clip):
                 ledger = json.load(f)
         except (FileNotFoundError, ValueError):
             ledger = {}
-        ledger.setdefault(source, []).append(list(_span(clip)))
+        ledger.setdefault(_ledger_key(source, channel), []).append(list(_span(clip)))
         with open(ledger_path, "w") as f:
             json.dump(ledger, f)
 
