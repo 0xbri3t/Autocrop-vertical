@@ -69,6 +69,17 @@ def test_post_uploads_the_file_then_posts_blotatos_copy(monkeypatch, clip_file):
                                       "privacyStatus": "public", "shouldNotifySubscribers": True}
 
 
+def test_tiktok_post_carries_every_field_blotato_requires(monkeypatch, clip_file):
+    calls = _mock(monkeypatch)
+    blotato.post_video("k", "blotato:61997", str(clip_file), "tiktok", "T", "caption")
+    body = json.loads(calls[-1].content)
+    assert body["post"]["content"]["platform"] == "tiktok"
+    assert body["post"]["target"] == {
+        "targetType": "tiktok", "privacyLevel": "PUBLIC_TO_EVERYONE", "disabledComments": False,
+        "disabledDuet": False, "disabledStitch": False, "isBrandedContent": False,
+        "isYourBrand": False, "isAiGenerated": False}
+
+
 @pytest.mark.parametrize("status,retryable", [(422, False), (403, False), (429, True), (503, True)])
 def test_only_rate_limits_and_server_errors_are_retryable(monkeypatch, clip_file, status, retryable):
     _mock(monkeypatch, post_status=status)
@@ -95,10 +106,12 @@ class TestSubmit:
             self._resolve(self.OPTS)
         assert "BLOTATO_API_KEY" in e.value.detail
 
-    def test_youtube_only(self, monkeypatch):
+    def test_one_supported_platform_per_channel(self, monkeypatch):
         monkeypatch.setenv("BLOTATO_API_KEY", "k")
-        with pytest.raises(HTTPException):
-            self._resolve({**self.OPTS, "platforms": ["tiktok"]})
+        assert self._resolve({**self.OPTS, "platforms": ["tiktok"]})[0]["platforms"] == ["tiktok"]
+        for bad in (["instagram"], ["youtube", "tiktok"]):
+            with pytest.raises(HTTPException):
+                self._resolve({**self.OPTS, "platforms": bad})
 
     def test_accepted_without_an_upload_post_key(self, monkeypatch):
         monkeypatch.setenv("BLOTATO_API_KEY", "k")

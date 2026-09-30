@@ -62,6 +62,23 @@ def _youtube_title(title: str) -> str:
     return (title or "Short").replace("<", "").replace(">", "")[:100]
 
 
+PLATFORMS = ("youtube", "tiktok")
+
+
+def _target(platform, title, privacy):
+    """Blotato's per-platform ``target``: every field it marks required."""
+    if platform == "youtube":
+        return {"targetType": "youtube", "title": _youtube_title(title),
+                "privacyStatus": privacy, "shouldNotifySubscribers": privacy == "public"}
+    if platform == "tiktok":
+        # Edited clips of real footage: not AI-generated, not branded content.
+        return {"targetType": "tiktok",
+                "privacyLevel": "PUBLIC_TO_EVERYONE" if privacy == "public" else "SELF_ONLY",
+                "disabledComments": False, "disabledDuet": False, "disabledStitch": False,
+                "isBrandedContent": False, "isYourBrand": False, "isAiGenerated": False}
+    raise BlotatoError(f"Posting to {platform} through Blotato is not supported here.", 400)
+
+
 def post_video(key, channel, file_path, platform, title, text, scheduled_iso=None,
                privacy="public"):
     """Upload ``file_path`` and publish (or schedule, ISO 8601 UTC) it on the
@@ -78,10 +95,7 @@ def post_video(key, channel, file_path, platform, title, text, scheduled_iso=Non
             raise BlotatoError(f"Uploading the clip failed ({put.status_code}): {put.text[:300]}",
                                put.status_code)
 
-        target = {"targetType": platform}
-        if platform == "youtube":
-            target.update(title=_youtube_title(title), privacyStatus=privacy,
-                          shouldNotifySubscribers=privacy == "public")
+        target = _target(platform, title, privacy)
         body = {"post": {"accountId": account_id(channel),
                          "content": {"text": text or title or "", "platform": platform,
                                      "mediaUrls": [upload["publicUrl"]]},

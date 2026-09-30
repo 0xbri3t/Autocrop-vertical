@@ -2080,9 +2080,9 @@ async def _resolve_auto_post(request, raw):
         if not blotato.api_key():
             raise HTTPException(status_code=400, detail=(
                 "Posting to a Blotato channel needs BLOTATO_API_KEY on the server."))
-        if opts['platforms'] != ["youtube"]:
+        if len(opts['platforms']) != 1 or opts['platforms'][0] not in blotato.PLATFORMS:
             raise HTTPException(status_code=400, detail=(
-                "Blotato channels post to youtube only here."))
+                f"A Blotato channel is one account: pick one of {', '.join(blotato.PLATFORMS)}."))
         return opts, None  # read from the env at post time, so it survives a restart
     key, _ = await resolve_upload_post(request, None)
     if not key:
@@ -2170,10 +2170,12 @@ async def _schedule_clip(job_id, clip, key, opts, slot):
                            timezone_name="UTC")
         return
     file_path = os.path.join(OUTPUT_DIR, job_id, clip['video_url'].split('/')[-1])
-    text = (clip.get('video_description_for_instagram')
+    platform = opts['platforms'][0]
+    text = ((platform == "tiktok" and clip.get('video_description_for_tiktok'))
+            or clip.get('video_description_for_instagram')
             or clip.get('video_description_for_tiktok') or title or "")
     try:
-        await asyncio.to_thread(blotato.post_video, key, opts['user_id'], file_path, "youtube",
+        await asyncio.to_thread(blotato.post_video, key, opts['user_id'], file_path, platform,
                                 title, text, slot.strftime("%Y-%m-%dT%H:%M:%SZ"))
     except blotato.BlotatoError as e:
         if not e.retryable:
