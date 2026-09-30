@@ -1,6 +1,7 @@
 import os
 import llm_backend
 import auto_post
+import blotato
 import re
 import sys
 import uuid
@@ -2075,6 +2076,14 @@ async def _resolve_auto_post(request, raw):
     if BILLING_ENABLED:
         raise HTTPException(status_code=400,
                             detail="auto_post is for self-hosted servers; use Autopilot instead.")
+    if blotato.is_channel(opts['user_id']):
+        if not blotato.api_key():
+            raise HTTPException(status_code=400, detail=(
+                "Posting to a Blotato channel needs BLOTATO_API_KEY on the server."))
+        if opts['platforms'] != ["youtube"]:
+            raise HTTPException(status_code=400, detail=(
+                "Blotato channels post to youtube only here."))
+        return opts, None  # read from the env at post time, so it survives a restart
     key, _ = await resolve_upload_post(request, None)
     if not key:
         raise HTTPException(status_code=400, detail=(
@@ -2111,10 +2120,15 @@ def _start_auto_post(job_id, job):
 async def _auto_post_job(job_id, job):
     opts = job['auto_post']
     logs = job['logs']
-    key = job.get('auto_post_key') or os.environ.get("UPLOAD_POST_API_KEY")
+    if blotato.is_channel(opts['user_id']):
+        key = blotato.api_key()
+        missing = "has no BLOTATO_API_KEY. Set it"
+    else:
+        key = job.get('auto_post_key') or os.environ.get("UPLOAD_POST_API_KEY")
+        missing = "restarted and has no Upload-Post key. Set UPLOAD_POST_API_KEY"
     if not key:
-        logs.append("⚠️ Auto-post skipped: the server restarted and has no Upload-Post key. "
-                    "Set UPLOAD_POST_API_KEY, or schedule these clips from the results.")
+        logs.append(f"⚠️ Auto-post skipped: the server {missing}, "
+                    f"or schedule these clips from the results.")
         return
     clips = (job.get('result') or {}).get('clips') or []
     posted = auto_post.posted_ranges(_POSTED_LEDGER, _job_source(job_id))
@@ -2130,10 +2144,7 @@ async def _auto_post_job(job_id, job):
         when = slot.strftime("%Y-%m-%d %H:%M")
         for attempt in range(1, _AUTO_POST_ATTEMPTS + 1):
             try:
-                await _upload_clip(job_id, clip, key, opts['user_id'], opts['platforms'],
-                                   title=clip.get('video_title_for_youtube_short'),
-                                   scheduled_date=slot.strftime("%Y-%m-%dT%H:%M:%S"),
-                                   timezone_name="UTC")
+                await _schedule_clip(job_id, clip, key, opts, slot)
                 logs.append(f"📅 Clip {index + 1} scheduled for {when} UTC on "
                             f"{', '.join(opts['platforms'])}.")
                 break
@@ -2146,6 +2157,29 @@ async def _auto_post_job(job_id, job):
                                 f"after {attempt} attempts: {e}")
                     break
                 await asyncio.sleep(_AUTO_POST_RETRY_SECONDS)
+
+
+async def _schedule_clip(job_id, clip, key, opts, slot):
+    """Schedule one clip on the job's channel: Blotato for ``blotato:<id>``
+    channels, Upload-Post otherwise. Raises HTTPException when the provider
+    rejected it (not worth retrying), anything else for a retryable failure."""
+    title = clip.get('video_title_for_youtube_short')
+    if not blotato.is_channel(opts['user_id']):
+        await _upload_clip(job_id, clip, key, opts['user_id'], opts['platforms'], title=title,
+                           scheduled_date=slot.strftime("%Y-%m-%dT%H:%M:%S"),
+                           timezone_name="UTC")
+        return
+    file_path = os.path.join(OUTPUT_DIR, job_id, clip['video_url'].split('/')[-1])
+    text = (clip.get('video_description_for_instagram')
+            or clip.get('video_description_for_tiktok') or title or "")
+    try:
+        await asyncio.to_thread(blotato.post_video, key, opts['user_id'], file_path, "youtube",
+                                title, text, slot.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except blotato.BlotatoError as e:
+        if not e.retryable:
+            raise HTTPException(status_code=502, detail=str(e))
+        raise
+    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), clip)
 
 
 async def _settle_reservation(job_id, job=None):
@@ -3347,6 +3381,20 @@ async def get_status(job_id: str, request: Request):
         # offer), so the dashboard can say so next to the clips.
         "partial": job.get('partial'),
     }
+
+
+@app.get("/api/social/blotato/accounts")
+async def blotato_accounts():
+    """Self-host: the Blotato accounts the channel picker offers ([] with no key)."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    key = blotato.api_key()
+    if not key:
+        return {"accounts": []}
+    try:
+        return {"accounts": await asyncio.to_thread(blotato.list_accounts, key)}
+    except (blotato.BlotatoError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=f"Blotato: {e}")
 
 
 @app.get("/api/local/history")

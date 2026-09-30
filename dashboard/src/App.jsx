@@ -310,6 +310,9 @@ function App() {
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
+  // Self-host: Blotato accounts (one channel each), offered next to the
+  // Upload-Post profiles in the auto-post channel picker.
+  const [blotatoChannels, setBlotatoChannels] = useState([]);
   // Post-generation social nudge: shown at the results peak until the user
   // either connects a network or dismisses it. Only 2.7% of cloud users who
   // reach the social flow ever connect an account — this is the moment (clips
@@ -701,6 +704,15 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadPostKey, isManaged]);
+
+  useEffect(() => {
+    if (billingEnabled) return;
+    apiJson('/api/social/blotato/accounts')
+      .then((d) => setBlotatoChannels((d.accounts || []).map((a) => ({
+        username: a.channel, label: `${a.label} (Blotato)`, connected: [a.platform],
+      }))))
+      .catch((e) => console.warn('Blotato accounts unavailable:', e));
+  }, [billingEnabled]);
 
   // For managed users, fetch the durable R2 URLs of the current job's clips. The
   // preview player prefers them (free egress, edge-served, and not competing with
@@ -1977,7 +1989,7 @@ function App() {
                 <MediaInput
                   onProcess={handleProcess}
                   isProcessing={status === 'processing'}
-                  autoPostProfiles={billingEnabled ? null : userProfiles}
+                  autoPostProfiles={billingEnabled ? null : [...userProfiles, ...blotatoChannels]}
                   defaultProfile={uploadUserId}
                 />
 

@@ -443,7 +443,7 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
                                             >
                                                 {profiles.map((p) => (
                                                     <option key={p.username} value={p.username}>
-                                                        {p.username} · {p.connected?.length ? p.connected.join(', ') : 'nothing connected'}
+                                                        {p.label || p.username} · {p.connected?.length ? p.connected.join(', ') : 'nothing connected'}
                                                     </option>
                                                 ))}
                                             </select>
@@ -453,7 +453,7 @@ export default function MediaInput({ onProcess, isProcessing, autoPostProfiles =
                                         <p className="text-[11px] leading-relaxed text-muted">
                                             {profiles.length === 0
                                                 ? 'Save your Upload-Post key in Settings to auto-post.'
-                                                : `Connect a network to "${channel?.username}" on upload-post.com, or pick another channel.`}
+                                                : `Connect a network to "${channel?.label || channel?.username}", or pick another channel.`}
                                         </p>
                                     )}
                                     {canAutoPost && autoPost.on && (
