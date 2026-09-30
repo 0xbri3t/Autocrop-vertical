@@ -813,7 +813,7 @@ def _content_block(error_text):
     return None
 
 
-def download_youtube_video(url, output_dir=".", on_audio=None):
+def download_youtube_video(url, output_dir=".", on_audio=None, on_captions=None):
     """
     Downloads a YouTube video using yt-dlp.
     Returns the path to the downloaded video and the video title.
@@ -822,6 +822,10 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
     on its own, in parallel, and handed over as soon as it lands, so the
     caller can transcribe while the (much larger) video is still coming. It is
     the same audio format the merged mp4 gets. Never on the per-GB proxy.
+
+    ``on_captions(transcript, duration)``: when given, YouTube's own ASR
+    captions are read as soon as the video info arrives (one small request)
+    and handed over as a word-level transcript (youtube_captions.py).
     """
     # SSRF guard: block non-http(s) schemes and private/loopback/metadata hosts
     # before handing the URL to yt-dlp.
@@ -944,7 +948,31 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
                                       or d.get('total_bytes_estimate')
                                       or d.get('downloaded_bytes') or 0)
 
-    _early = {"started": False}
+    _early = {"started": False, "captions": False}
+
+    def _early_captions(info, extractor_args, proxy, cookies):
+        """Hand YouTube's ASR captions to on_captions; silent fallback on any miss."""
+        import youtube_captions
+        try:
+            track_url, lang = youtube_captions.asr_track(info)
+            if not track_url:
+                print("   ℹ️ No YouTube auto-captions for this video — transcribing locally.")
+                return False
+            with yt_dlp.YoutubeDL(_base_opts(extractor_args, proxy, cookies)) as ydl:
+                raw = ydl.urlopen(track_url).read()
+            transcript = youtube_captions.transcript_from_json3(raw, lang)
+            if transcript is None:
+                print("   ℹ️ YouTube captions too short to use — transcribing locally.")
+                return False
+            n_words = sum(len(s["words"]) for s in transcript["segments"])
+            print(f"📝 Using YouTube's own captions ({n_words} words, '{lang}') "
+                  f"— skipping transcription.")
+            on_captions(transcript, info.get('duration'))
+            return True
+        except Exception as e:
+            print(f"   ℹ️ YouTube captions skipped ({type(e).__name__}: {e}) — "
+                  f"transcribing locally.")
+            return False
 
     # A job only paid for so many minutes (MAX_SOURCE_MINUTES: the quota-wall
     # offer; SOURCE_CAP_MINUTES: every metered job, a safety cap). yt-dlp used
@@ -1006,6 +1034,9 @@ def download_youtube_video(url, output_dir=".", on_audio=None):
         # Once per download, and not on the per-GB proxy (that is paid bytes,
         # and it is the last resort anyway). Not for a ranged download either:
         # the early audio would be the whole source.
+        if on_captions and not _early["captions"] and not ranged:
+            _early["captions"] = True
+            _early["started"] = _early_captions(info, extractor_args, proxy, cookies)
         if (on_audio and not _early["started"] and info.get('formats') and not ranged
                 and not (_proxy and proxy == _proxy)):
             _early["started"] = True
@@ -2179,9 +2210,9 @@ if __name__ == '__main__':
         early = {"lock": threading.Lock(), "done": threading.Event(), "started": False,
                  "abandoned": False, "invalid": False, "transcript": None, "clips": None}
 
-        def _early_work(audio_path, audio_duration):
+        def _early_work(audio_path, audio_duration, transcript=None):
             try:
-                t = transcribe_video(audio_path)
+                t = transcript if transcript is not None else transcribe_video(audio_path)
                 early["transcript"] = t
                 if audio_duration and not speech_is_sparse(t, audio_duration):
                     early["clips"] = get_viral_clips(t, audio_duration)
@@ -2190,25 +2221,42 @@ if __name__ == '__main__':
                 early["transcript"] = early["clips"] = None
             finally:
                 early["done"].set()
+                if audio_path:
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        pass
+
+        def _on_audio(audio_path, audio_duration):
+            with early["lock"]:
+                skip = early["abandoned"] or early["started"]  # captions got there first
+                early["started"] = True
+            if skip:
                 try:
                     os.remove(audio_path)
                 except OSError:
                     pass
+                return
+            threading.Thread(target=_early_work, args=(audio_path, audio_duration),
+                             daemon=True).start()
 
-        def _on_audio(audio_path, audio_duration):
+        def _on_captions(transcript, duration):
             with early["lock"]:
-                if early["abandoned"]:
+                if early["abandoned"] or early["started"]:
                     return
                 early["started"] = True
-            threading.Thread(target=_early_work, args=(audio_path, audio_duration),
+            threading.Thread(target=_early_work, args=(None, duration, transcript),
                              daemon=True).start()
 
         use_early = (not args.skip_analysis and not args.transcript
                      and os.environ.get("EARLY_AUDIO", "1").strip() != "0"
                      and not os.environ.get("MAX_SOURCE_MINUTES", "").strip()
                      and not os.path.exists(os.path.join(output_dir, TRANSCRIPT_CHECKPOINT)))
+        import youtube_captions
+        use_captions = use_early and youtube_captions.enabled()
         input_video, video_title = download_youtube_video(
-            args.url, output_dir, on_audio=_on_audio if use_early else None)
+            args.url, output_dir, on_audio=_on_audio if use_early else None,
+            on_captions=_on_captions if use_captions else None)
     else:
         input_video = args.input
         video_title = os.path.splitext(os.path.basename(input_video))[0]
