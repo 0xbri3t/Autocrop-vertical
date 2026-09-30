@@ -18,7 +18,7 @@ import blotato
 PUBLIC_URL = "https://database.blotato.io/media/clip.mp4"
 
 
-def _mock(monkeypatch, post_status=201, calls=None):
+def _mock(monkeypatch, post_status=201, calls=None, stored_at=None):
     calls = [] if calls is None else calls
 
     def handler(request):
@@ -33,6 +33,12 @@ def _mock(monkeypatch, post_status=201, calls=None):
             if post_status >= 400:
                 return httpx.Response(post_status, json={"message": "nope"})
             return httpx.Response(201, json={"postSubmissionId": "sub-1"})
+        if path.endswith("/schedules") and request.method == "GET":
+            return httpx.Response(200, json={"items": [
+                {"id": "s-9", "scheduledAt": stored_at or "2026-09-30T13:43:00.000Z",
+                 "draft": {"content": {"mediaUrls": [PUBLIC_URL]}}}]})
+        if "/schedules/" in path and request.method == "PATCH":
+            return httpx.Response(204)
         if path.endswith("/users/me/accounts"):
             return httpx.Response(200, json={"items": [
                 {"id": "51821", "platform": "youtube", "fullname": "Satoshi Minutes", "username": ""}]})
@@ -57,7 +63,7 @@ def test_post_uploads_the_file_then_posts_blotatos_copy(monkeypatch, clip_file):
     blotato.post_video("k", "blotato:51821", str(clip_file), "youtube",
                        "A <bad> title", "desc", "2026-09-30T13:43:00Z")
 
-    upload, put, post = calls
+    upload, put, post = calls[:3]
     assert upload.headers["blotato-api-key"] == "k"
     assert json.loads(upload.content) == {"filename": "clip.mp4"}
     assert put.content == b"video-bytes"
@@ -78,6 +84,20 @@ def test_tiktok_post_carries_every_field_blotato_requires(monkeypatch, clip_file
         "targetType": "tiktok", "privacyLevel": "PUBLIC_TO_EVERYONE", "disabledComments": False,
         "disabledDuet": False, "disabledStitch": False, "isBrandedContent": False,
         "isYourBrand": False, "isAiGenerated": False}
+
+
+def test_a_shifted_schedule_is_moved_back(monkeypatch, clip_file):
+    calls = _mock(monkeypatch, stored_at="2026-09-30T11:43:00.000Z")
+    blotato.post_video("k", "blotato:1", str(clip_file), "youtube", "t", "d", "2026-09-30T13:43:00Z")
+    patch = calls[-1]
+    assert patch.method == "PATCH" and patch.url.path.endswith("/schedules/s-9")
+    assert json.loads(patch.content) == {"patch": {"scheduledTime": "2026-09-30T13:43:00Z"}}
+
+
+def test_a_correct_schedule_is_left_alone(monkeypatch, clip_file):
+    calls = _mock(monkeypatch, stored_at="2026-09-30T13:43:00.000Z")
+    blotato.post_video("k", "blotato:1", str(clip_file), "youtube", "t", "d", "2026-09-30T13:43:00Z")
+    assert all(c.method != "PATCH" for c in calls)
 
 
 @pytest.mark.parametrize("status,retryable", [(422, False), (403, False), (429, True), (503, True)])

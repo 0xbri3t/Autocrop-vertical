@@ -44,7 +44,7 @@ def _check(resp: httpx.Response, what: str) -> dict:
         except ValueError:
             message = resp.text
         raise BlotatoError(f"{what} failed ({resp.status_code}): {message[:300]}", resp.status_code)
-    return resp.json()
+    return resp.json() if resp.content else {}  # PATCH answers 204 with no body
 
 
 def list_accounts(key: str) -> list:
@@ -102,4 +102,33 @@ def post_video(key, channel, file_path, platform, title, text, scheduled_iso=Non
                          "target": target}}
         if scheduled_iso:
             body["scheduledTime"] = scheduled_iso
-        return _check(client.post(f"{API}/posts", headers=headers, json=body), "Creating the post")
+        result = _check(client.post(f"{API}/posts", headers=headers, json=body), "Creating the post")
+        if scheduled_iso:
+            _enforce_time(client, headers, upload["publicUrl"], scheduled_iso)
+        return result
+
+
+def _same_instant(a: str, b: str) -> bool:
+    from datetime import datetime
+    return datetime.fromisoformat(a.replace("Z", "+00:00")) == datetime.fromisoformat(b.replace("Z", "+00:00"))
+
+
+def _enforce_time(client, headers, media_url, scheduled_iso):
+    """Read back the stored schedule and move it if Blotato shifted it.
+
+    29-sep-2026: two YouTube posts created with scheduledTime 13:43Z and
+    14:43Z were stored at 11:43Z and 12:43Z (the account's UTC+2 offset) and
+    one went out two hours early; a later identical request was stored
+    correctly. The upload URL is unique per post, so it identifies the
+    schedule without guessing.
+    """
+    items = _check(client.get(f"{API}/schedules", headers=headers, params={"limit": 100}),
+                   "Reading back the schedule").get("items") or []
+    for item in items:
+        media = (((item.get("draft") or {}).get("content") or {}).get("mediaUrls") or [])
+        if media_url in media and not _same_instant(item.get("scheduledAt") or scheduled_iso,
+                                                    scheduled_iso):
+            print(f"⚠️ Blotato stored {item.get('scheduledAt')} instead of {scheduled_iso}; moving it.")
+            _check(client.patch(f"{API}/schedules/{item['id']}", headers=headers,
+                                json={"patch": {"scheduledTime": scheduled_iso}}),
+                   "Correcting the scheduled time")
