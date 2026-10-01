@@ -100,6 +100,14 @@ def test_a_correct_schedule_is_left_alone(monkeypatch, clip_file):
     assert all(c.method != "PATCH" for c in calls)
 
 
+def test_instagram_post_is_a_reel_shared_to_the_feed(monkeypatch, clip_file):
+    calls = _mock(monkeypatch)
+    blotato.post_video("k", "blotato:75181", str(clip_file), "instagram", "T", "caption")
+    body = json.loads(calls[-1].content)
+    assert body["post"]["content"]["platform"] == "instagram"
+    assert body["post"]["target"] == {"targetType": "instagram", "mediaType": "reel", "shareToFeed": True}
+
+
 @pytest.mark.parametrize("status,retryable", [(422, False), (403, False), (429, True), (503, True)])
 def test_only_rate_limits_and_server_errors_are_retryable(monkeypatch, clip_file, status, retryable):
     _mock(monkeypatch, post_status=status)
@@ -129,7 +137,7 @@ class TestSubmit:
     def test_one_supported_platform_per_channel(self, monkeypatch):
         monkeypatch.setenv("BLOTATO_API_KEY", "k")
         assert self._resolve({**self.OPTS, "platforms": ["tiktok"]})[0][0]["platforms"] == ["tiktok"]
-        for bad in (["instagram"], ["youtube", "tiktok"]):
+        for bad in (["linkedin"], ["youtube", "tiktok"]):
             with pytest.raises(HTTPException):
                 self._resolve({**self.OPTS, "platforms": bad})
 

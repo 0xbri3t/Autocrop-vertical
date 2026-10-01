@@ -62,7 +62,7 @@ def _youtube_title(title: str) -> str:
     return (title or "Short").replace("<", "").replace(">", "")[:100]
 
 
-PLATFORMS = ("youtube", "tiktok")
+PLATFORMS = ("youtube", "tiktok", "instagram")
 
 
 def _target(platform, title, privacy):
@@ -76,6 +76,10 @@ def _target(platform, title, privacy):
                 "privacyLevel": "PUBLIC_TO_EVERYONE" if privacy == "public" else "SELF_ONLY",
                 "disabledComments": False, "disabledDuet": False, "disabledStitch": False,
                 "isBrandedContent": False, "isYourBrand": False, "isAiGenerated": False}
+    if platform == "instagram":
+        # A Reel, also shown on the profile grid. Instagram has no private
+        # mode, so ``privacy`` does not apply.
+        return {"targetType": "instagram", "mediaType": "reel", "shareToFeed": True}
     raise BlotatoError(f"Posting to {platform} through Blotato is not supported here.", 400)
 
 
