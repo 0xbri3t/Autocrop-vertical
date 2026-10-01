@@ -1,0 +1,27 @@
+# The only door into a self-hosted OpenShorts on a VPS (docker-compose.vps.yml).
+# Self-host has no accounts: every API route, every clip under /videos and the
+# local history are open to whoever reaches the backend. So nothing else
+# publishes a port, and everything here sits behind one password.
+{$DOMAIN:localhost} {
+	basic_auth {
+		{$AUTH_USER} {$AUTH_HASH}
+	}
+
+	@backend path /api/* /videos/* /thumbnails/* /mcp /mcp/* /gallery /video/*
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+	handle /render/* {
+		reverse_proxy renderer:3100
+	}
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Robots-Tag "noindex, nofollow"
+	}
+}

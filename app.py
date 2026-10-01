@@ -1,5 +1,7 @@
 import os
 import llm_backend
+import auto_post
+import blotato
 import re
 import sys
 import uuid
@@ -1144,7 +1146,7 @@ def _install_drain_signal_handler():
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
                            webhook_url=None, webhook_secret=None, base_url=None,
-                           partial=None, source_cap_minutes=None):
+                           partial=None, source_cap_minutes=None, auto_post_opts=None):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
@@ -1166,6 +1168,9 @@ def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, water
                 "partial": partial,
                 # Same reason for the whole-video jobs' safety cap.
                 "source_cap_minutes": source_cap_minutes,
+                # Without the Upload-Post key: a resumed job posts with
+                # UPLOAD_POST_API_KEY from the env, or logs why it cannot.
+                "auto_post": auto_post_opts,
             }, f)
     except Exception as e:
         print(f"⚠️ Could not write resume manifest for {job_id}: {e}")
@@ -1286,6 +1291,7 @@ def _resume_interrupted_jobs() -> set:
             'webhook_url': m.get("webhook_url"),
             'webhook_secret': m.get("webhook_secret"),
             'base_url': m.get("base_url"),
+            'auto_post': auto_post.as_list(m.get("auto_post")),
         }
         _enqueue_job(job_id, int(m.get("priority", 2)))
         resumed += 1
@@ -1653,6 +1659,8 @@ async def run_job_wrapper(job_id):
         await _autopilot_job_finished(job_id, job)
         # Fire the caller's webhook (after archive, so durable links exist).
         await _notify_job_webhook(job_id)
+        # Self-host auto-post: schedule the best clips on Upload-Post.
+        _start_auto_post(job_id, job)
         # Operational alerting for managed jobs (proxy out of credits / failures).
         await _record_job_alert(job_id)
         # Accumulate proxy bandwidth for the monthly cost alert.
@@ -2039,6 +2047,152 @@ async def _notify_job_webhook(job_id):
         payload["error"] = _job_error_text(job.get('logs', []))[-500:]
     body = json.dumps(payload).encode()
     asyncio.create_task(_deliver_webhook(url, body, job.get('webhook_secret')))
+
+
+# --- Self-host auto-post -------------------------------------------------------
+# /api/process takes `auto_post`: one {platforms, user_id, clips, interval_hours}
+# per channel (a list, or one object);
+# when the job completes, its best clips are scheduled on Upload-Post, spaced
+# on its channel's own calendar (auto_post.claim_slots). Cloud has Autopilot.
+_AUTO_POST_CALENDAR = os.path.join(OUTPUT_DIR, ".autopost.json")
+# Every clip span posted per source video, so a rerun of the same video never
+# publishes the same moment twice (manual posts and auto-posts alike).
+_POSTED_LEDGER = os.path.join(OUTPUT_DIR, ".posted.json")
+# A laptop's Wi-Fi/DNS blip lost a whole run's scheduling (29-sep-2026:
+# "Name or service not known" on every clip); a few minutes covers one.
+_AUTO_POST_ATTEMPTS = 4
+_AUTO_POST_RETRY_SECONDS = 60
+
+
+async def _resolve_auto_post(request, raw):
+    """Validate a submit's auto_post option: ``(channels, upload_key)`` or
+    ``(None, None)``. Keys are checked now so a job never renders for an
+    hour only to find it cannot post."""
+    try:
+        channels = auto_post.parse_options(raw)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if channels is None:
+        return None, None
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=400,
+                            detail="auto_post is for self-hosted servers; use Autopilot instead.")
+    for opts in channels:
+        if not blotato.is_channel(opts['user_id']):
+            continue
+        if not blotato.api_key():
+            raise HTTPException(status_code=400, detail=(
+                "Posting to a Blotato channel needs BLOTATO_API_KEY on the server."))
+        if len(opts['platforms']) != 1 or opts['platforms'][0] not in blotato.PLATFORMS:
+            raise HTTPException(status_code=400, detail=(
+                f"A Blotato channel is one account: pick one of {', '.join(blotato.PLATFORMS)}."))
+    if all(blotato.is_channel(opts['user_id']) for opts in channels):
+        return channels, None  # Blotato's key is read from the env at post time
+    key, _ = await resolve_upload_post(request, None)
+    if not key:
+        raise HTTPException(status_code=400, detail=(
+            "auto_post needs an Upload-Post key: save it in Settings "
+            "or set UPLOAD_POST_API_KEY on the server."))
+    return channels, key
+
+
+def _job_source(job_id):
+    """Ledger key of the video a job clipped (auto_post.source_key), or None."""
+    cmd = (jobs.get(job_id) or {}).get('cmd') or []
+    # The last -u: the first is python's own unbuffered flag (python -u main.py -u URL).
+    url_flags = [i for i, arg in enumerate(cmd) if arg == '-u' and i + 1 < len(cmd)]
+    if url_flags:
+        return auto_post.source_key(cmd[url_flags[-1] + 1])
+    for meta in glob.glob(os.path.join(OUTPUT_DIR, job_id, "*_metadata.json")):
+        try:
+            with open(meta) as f:
+                return auto_post.source_key(json.load(f).get('source_url'))
+        except (OSError, ValueError) as e:
+            print(f"⚠️ Could not read {meta} for its source ({e})")
+    return None
+
+
+def _start_auto_post(job_id, job):
+    """Detach the scheduling of a completed job's clips (once per job): the
+    uploads take tens of seconds each and must not hold the worker slot."""
+    if job.get('status') != 'completed' or not job.get('auto_post') or job.get('auto_post_started'):
+        return
+    job['auto_post_started'] = True
+    asyncio.create_task(_auto_post_job(job_id, job))
+
+
+async def _auto_post_job(job_id, job):
+    for opts in auto_post.as_list(job['auto_post']):
+        await _auto_post_channel(job_id, job, opts)
+
+
+async def _auto_post_channel(job_id, job, opts):
+    """Schedule the job's best clips on one channel, on that channel's calendar."""
+    logs = job['logs']
+    channel = opts['user_id']
+    if blotato.is_channel(channel):
+        key = blotato.api_key()
+        missing = "has no BLOTATO_API_KEY. Set it"
+    else:
+        key = job.get('auto_post_key') or os.environ.get("UPLOAD_POST_API_KEY")
+        missing = "restarted and has no Upload-Post key. Set UPLOAD_POST_API_KEY"
+    if not key:
+        logs.append(f"⚠️ Auto-post to {channel} skipped: the server {missing}, "
+                    f"or schedule these clips from the results.")
+        return
+    clips = (job.get('result') or {}).get('clips') or []
+    posted = auto_post.posted_ranges(_POSTED_LEDGER, _job_source(job_id), channel)
+    repeats = [i for i, c in enumerate(clips) if auto_post.overlaps_posted(c, posted)]
+    if repeats:
+        logs.append(f"⏭️ Skipping clip(s) {', '.join(str(i + 1) for i in repeats)} on {channel}: "
+                    f"already posted there from this video.")
+    picked = auto_post.pick_clips(clips, opts['clips'], posted)
+    slots = auto_post.claim_slots(_AUTO_POST_CALENDAR, channel, len(picked),
+                                  opts['interval_hours'])
+    where = f"{channel} ({', '.join(opts['platforms'])})"
+    for index, slot in zip(picked, slots):
+        clip = clips[index]
+        when = slot.strftime("%Y-%m-%d %H:%M")
+        for attempt in range(1, _AUTO_POST_ATTEMPTS + 1):
+            try:
+                await _schedule_clip(job_id, clip, key, opts, slot)
+                logs.append(f"📅 Clip {index + 1} scheduled for {when} UTC on {where}.")
+                break
+            except HTTPException as e:  # the provider answered: retrying will not change it
+                logs.append(f"⚠️ Clip {index + 1} could not be scheduled for {when} UTC "
+                            f"on {where}: {e.detail}")
+                break
+            except Exception as e:  # network (DNS, timeout, reset): worth another try
+                if attempt == _AUTO_POST_ATTEMPTS:
+                    logs.append(f"⚠️ Clip {index + 1} could not be scheduled for {when} UTC "
+                                f"on {where} after {attempt} attempts: {e}")
+                    break
+                await asyncio.sleep(_AUTO_POST_RETRY_SECONDS)
+
+
+async def _schedule_clip(job_id, clip, key, opts, slot):
+    """Schedule one clip on the job's channel: Blotato for ``blotato:<id>``
+    channels, Upload-Post otherwise. Raises HTTPException when the provider
+    rejected it (not worth retrying), anything else for a retryable failure."""
+    title = clip.get('video_title_for_youtube_short')
+    if not blotato.is_channel(opts['user_id']):
+        await _upload_clip(job_id, clip, key, opts['user_id'], opts['platforms'], title=title,
+                           scheduled_date=slot.strftime("%Y-%m-%dT%H:%M:%S"),
+                           timezone_name="UTC")
+        return
+    file_path = os.path.join(OUTPUT_DIR, job_id, clip['video_url'].split('/')[-1])
+    platform = opts['platforms'][0]
+    text = ((platform == "tiktok" and clip.get('video_description_for_tiktok'))
+            or clip.get('video_description_for_instagram')
+            or clip.get('video_description_for_tiktok') or title or "")
+    try:
+        await asyncio.to_thread(blotato.post_video, key, opts['user_id'], file_path, platform,
+                                title, text, slot.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    except blotato.BlotatoError as e:
+        if not e.retryable:
+            raise HTTPException(status_code=502, detail=str(e))
+        raise
+    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), opts['user_id'], clip)
 
 
 async def _settle_reservation(job_id, job=None):
@@ -2824,6 +2978,7 @@ async def process_endpoint(
     captions: Optional[str] = Form(None),
     upload_id: Optional[str] = Form(None),
     max_minutes: Optional[str] = Form(None),
+    auto_post_raw: Optional[str] = Form(None, alias="auto_post"),
 ):
     api_key = await resolve_gemini(request)
     if not api_key and not (llm_backend.active() and not BILLING_ENABLED):
@@ -2859,6 +3014,9 @@ async def process_endpoint(
         captions = body.get("captions")
         upload_id = body.get("upload_id")
         max_minutes = body.get("max_minutes")
+        auto_post_raw = body.get("auto_post")
+
+    auto_post_opts, auto_post_key = await _resolve_auto_post(request, auto_post_raw)
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -3149,6 +3307,9 @@ async def process_endpoint(
         'base_url': api_base,
         # Read by the ClipsDelivered/JobFailed analytics event (plan).
         'user_plan': user_plan,
+        'auto_post': auto_post_opts,
+        # Memory only, never in the manifest: see _write_resume_manifest.
+        'auto_post_key': auto_post_key,
     }
 
     # Persist the owner so recovered jobs keep their multi-tenant guard after a
@@ -3167,7 +3328,7 @@ async def process_endpoint(
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
                            base_url=api_base, partial=partial,
-                           source_cap_minutes=source_cap)
+                           source_cap_minutes=source_cap, auto_post_opts=auto_post_opts)
 
     _enqueue_job(job_id, priority)
 
@@ -3233,6 +3394,59 @@ async def get_status(job_id: str, request: Request):
         # offer), so the dashboard can say so next to the clips.
         "partial": job.get('partial'),
     }
+
+
+@app.get("/api/social/blotato/accounts")
+async def blotato_accounts():
+    """Self-host: the Blotato accounts the channel picker offers ([] with no key)."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    key = blotato.api_key()
+    if not key:
+        return {"accounts": []}
+    try:
+        return {"accounts": await asyncio.to_thread(blotato.list_accounts, key)}
+    except (blotato.BlotatoError, httpx.HTTPError) as e:
+        raise HTTPException(status_code=502, detail=f"Blotato: {e}")
+
+
+@app.get("/api/local/history")
+async def local_history():
+    """Self-host only: every finished job on this server's disk, newest first.
+
+    Lists what /videos already serves to anyone who knows a job id, so it is
+    exactly as private as the deployment: expose it only behind the gate in
+    docker-compose.vps.yml. Cloud answers 404, since it would list every
+    account's jobs.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+    _recover_jobs_from_disk()
+    projects, videos = [], []
+    for job_id, job in list(jobs.items()):
+        clips = (job.get('result') or {}).get('clips') or []
+        job_path = os.path.join(OUTPUT_DIR, job_id)
+        if job.get('status') != 'completed' or not clips or not os.path.isdir(job_path):
+            continue
+        meta = glob.glob(os.path.join(job_path, "*_metadata.json"))
+        title = (os.path.basename(meta[0])[:-len("_metadata.json")].replace('_', ' ')
+                 if meta else 'Project')
+        mtime = os.path.getmtime(job_path)
+        created = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+        projects.append({'job_id': job_id, 'title': title, 'mtime': mtime})
+        for i, clip in enumerate(clips):
+            url = clip.get('video_url')
+            if not url:
+                continue
+            videos.append({
+                'id': f"{job_id}-{i}", 'job_id': job_id, 'clip_index': i, 'mtime': mtime,
+                'title': clip.get('video_title_for_youtube_short') or f"Clip {i + 1}",
+                'created_at': created, 'view_url': url, 'download_url': url,
+            })
+    projects.sort(key=lambda p: p['mtime'], reverse=True)
+    videos.sort(key=lambda v: (-v['mtime'], v['clip_index']))
+    return {'projects': projects, 'videos': videos,
+            'retention_seconds': JOB_RETENTION_SECONDS}
 
 
 def _locate_source(job_id: str):
@@ -5248,6 +5462,61 @@ def _post_video_blocking(url, headers, data, file_path, filename, timeout):
         return client.post(url, headers=headers, data=data, files=files)
 
 
+async def _upload_clip(job_id, clip, upload_key, post_user, platforms, title=None,
+                       description=None, scheduled_date=None, timezone_name=None):
+    """Send one rendered clip to Upload-Post (now, or at ``scheduled_date``).
+
+    Shared by /api/social/post and the self-host auto-poster, so both build the
+    exact same per-platform payload. Raises HTTPException on a vendor error.
+    """
+    filename = clip['video_url'].split('/')[-1]
+    file_path = os.path.join(OUTPUT_DIR, job_id, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
+
+    final_title = title or clip.get('title', 'Viral Short')
+    final_description = (description or clip.get('video_description_for_instagram')
+                         or clip.get('video_description_for_tiktok') or "Check this out!")
+    url = "https://api.upload-post.com/api/upload"
+    headers = {"Authorization": f"Apikey {upload_key}"}
+    data_payload = {
+        "user": post_user,
+        "title": final_title,
+        "platform[]": platforms,
+        "async_upload": "true",
+    }
+    if scheduled_date:
+        data_payload["scheduled_date"] = scheduled_date
+        if timezone_name:
+            data_payload["timezone"] = timezone_name
+    if "tiktok" in platforms:
+        data_payload["tiktok_title"] = final_description
+        data_payload["post_mode"] = TIKTOK_POST_MODE
+    if "instagram" in platforms:
+        data_payload["instagram_title"] = final_description
+        data_payload["media_type"] = "REELS"
+    if "youtube" in platforms:
+        data_payload["youtube_title"] = title or clip.get('video_title_for_youtube_short', final_title)
+        data_payload["youtube_description"] = final_description
+        data_payload["privacyStatus"] = "public"
+
+    # The upload is a blocking multipart POST of the whole clip (tens of
+    # seconds for TikTok+YouTube). Run inline, it froze the event loop:
+    # 23-sep-2026 19:47:48 UTC one post stalled every request, /health
+    # included, for 42 s and the uptime monitor paged "openshorts-api
+    # down". It runs in a worker thread so the API keeps answering.
+    print(f"📡 Sending to Upload-Post for platforms: {platforms}")
+    response = await asyncio.to_thread(
+        _post_video_blocking, url, headers, data_payload, file_path, filename, 120.0
+    )
+    if response.status_code not in [200, 201, 202]:
+        print(f"❌ Upload-Post Error: {response.text}")
+        raise HTTPException(status_code=response.status_code,
+                            detail=f"Vendor API Error: {response.text}")
+    auto_post.record_posted(_POSTED_LEDGER, _job_source(job_id), post_user, clip)
+    return response.json()
+
+
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest, request: Request):
     await _ensure_job_files(req.job_id, request)
@@ -5268,72 +5537,10 @@ async def post_to_socials(req: SocialPostRequest, request: Request):
 
     try:
         clip = job['result']['clips'][req.clip_index]
-        # Video URL is relative /videos/..., we need absolute file path
-        # clip['video_url'] is like "/videos/{job_id}/{filename}"
-        # We constructed it as: f"/videos/{job_id}/{clip_filename}"
-        # And file is at f"{OUTPUT_DIR}/{job_id}/{clip_filename}"
-        
-        filename = clip['video_url'].split('/')[-1]
-        file_path = os.path.join(OUTPUT_DIR, req.job_id, filename)
-        
-        if not os.path.exists(file_path):
-             raise HTTPException(status_code=404, detail=f"Video file not found: {file_path}")
-
-        # Construct parameters for Upload-Post API
-        # Fallbacks
-        final_title = req.title or clip.get('title', 'Viral Short')
-        final_description = req.description or clip.get('video_description_for_instagram') or clip.get('video_description_for_tiktok') or "Check this out!"
-        
-        # Prepare form data
-        url = "https://api.upload-post.com/api/upload"
-        headers = {
-            "Authorization": f"Apikey {upload_key}"
-        }
-
-        # Prepare data as dict (httpx handles lists for multiple values)
-        data_payload = {
-            "user": post_user,
-            "title": final_title,
-            "platform[]": req.platforms, # Pass list directly
-            "async_upload": "true"  # Enable async upload
-        }
-
-        # Add scheduling if present
-        if req.scheduled_date:
-            data_payload["scheduled_date"] = req.scheduled_date
-            if req.timezone:
-                data_payload["timezone"] = req.timezone
-        
-        # Add Platform specifics
-        if "tiktok" in req.platforms:
-             data_payload["tiktok_title"] = final_description
-             data_payload["post_mode"] = TIKTOK_POST_MODE
-             
-        if "instagram" in req.platforms:
-             data_payload["instagram_title"] = final_description
-             data_payload["media_type"] = "REELS"
-
-        if "youtube" in req.platforms:
-             yt_title = req.title or clip.get('video_title_for_youtube_short', final_title)
-             data_payload["youtube_title"] = yt_title
-             data_payload["youtube_description"] = final_description
-             data_payload["privacyStatus"] = "public"
-
-        # The upload is a blocking multipart POST of the whole clip (tens of
-        # seconds for TikTok+YouTube). Run inline, it froze the event loop:
-        # 23-sep-2026 19:47:48 UTC one post stalled every request, /health
-        # included, for 42 s and the uptime monitor paged "openshorts-api
-        # down". It runs in a worker thread so the API keeps answering.
-        print(f"📡 Sending to Upload-Post for platforms: {req.platforms}")
-        response = await asyncio.to_thread(
-            _post_video_blocking, url, headers, data_payload, file_path, filename, 120.0
-        )
-
-        if response.status_code not in [200, 201, 202]: # Added 201
-             print(f"❌ Upload-Post Error: {response.text}")
-             raise HTTPException(status_code=response.status_code, detail=f"Vendor API Error: {response.text}")
-
-        return response.json()
+        return await _upload_clip(
+            req.job_id, clip, upload_key, post_user, req.platforms,
+            title=req.title, description=req.description,
+            scheduled_date=req.scheduled_date, timezone_name=req.timezone)
 
     except Exception as e:
         print(f"❌ Social Post Exception: {e}")

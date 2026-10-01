@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Loader2, Download, Film, FolderOpen } from 'lucide-react';
 import { apiJson } from '../lib/api';
+import { getApiUrl } from '../config';
 
 // The signed-in user's saved video library (stored in R2). Private, signed links.
 // Videos are grouped by project (job); re-openable projects get a "reopen"
 // action that restores the whole job for further editing in the Clip Generator.
-export default function HistoryTab({ onReopenProject }) {
+// `local` (self-host): the runs on this server's disk instead, from one call.
+export default function HistoryTab({ onReopenProject, local = false, retention = '' }) {
   const [videos, setVideos] = useState(null);
   const [projects, setProjects] = useState({});
   const [reopening, setReopening] = useState(null);
@@ -13,6 +15,17 @@ export default function HistoryTab({ onReopenProject }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (local) {
+      apiJson('/api/local/history')
+        .then((d) => {
+          setVideos((d.videos || []).map((v) => ({
+            ...v, view_url: getApiUrl(v.view_url), download_url: getApiUrl(v.download_url),
+          })));
+          setProjects(Object.fromEntries((d.projects || []).map((p) => [p.job_id, p])));
+        })
+        .catch(() => setError('Could not load the runs on this server.'));
+      return;
+    }
     apiJson('/api/history')
       .then((d) => setVideos(d.videos || []))
       .catch(() => setError('Could not load your library.'));
@@ -23,7 +36,7 @@ export default function HistoryTab({ onReopenProject }) {
         setProjects(map);
       })
       .catch(() => {});
-  }, []);
+  }, [local]);
 
   // Group videos by job, preserving the newest-first order of /api/history.
   const groups = useMemo(() => {
@@ -59,7 +72,9 @@ export default function HistoryTab({ onReopenProject }) {
       <p className="eyebrow mb-1.5">07 · HISTORY</p>
       <h1 className="font-display lowercase text-2xl text-ink mb-2">Your library</h1>
       <p className="text-muted text-sm mb-8 lowercase">
-        All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips.
+        {local
+          ? `Every run on this server. Each one is deleted ${retention || 'after the retention period'} after its last change; raise JOB_RETENTION_SECONDS to keep them longer. Reopen a project to keep editing its clips.`
+          : "All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips."}
       </p>
 
       {error && <p className="text-danger text-sm">{error}</p>}
@@ -109,7 +124,7 @@ export default function HistoryTab({ onReopenProject }) {
                       <p className="text-sm text-ink font-medium line-clamp-2 mb-1" title={v.title}>{v.title || 'Short'}</p>
                       <div className="flex items-center justify-between">
                         <span className="readout">{fmtDate(v.created_at)}</span>
-                        <a href={v.download_url} className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1 transition-colors" title="Download">
+                        <a href={v.download_url} download className="text-micro font-mono uppercase text-brass hover:text-ink flex items-center gap-1 transition-colors" title="Download">
                           <Download size={14} /> Download
                         </a>
                       </div>
